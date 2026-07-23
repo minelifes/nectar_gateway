@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -252,11 +253,14 @@ func (s *Server) issueCert(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "route not found"})
 		return
 	}
+	log.Printf("certbot: obtaining certificate for %s", rt.Domain)
 	certFile, keyFile, err := s.certbot.Obtain(r.Context(), rt.Domain)
 	if err != nil {
+		log.Printf("certbot: %s: %v", rt.Domain, err)
 		writeErr(w, http.StatusBadGateway, err)
 		return
 	}
+	log.Printf("certbot: issued certificate for %s", rt.Domain)
 	rt.CertFile = certFile
 	rt.KeyFile = keyFile
 	if err := s.store.Update(&rt); err != nil {

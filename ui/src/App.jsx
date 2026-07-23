@@ -4,7 +4,7 @@ import {
   TableCell, TableContainer, TableHead, TableRow, IconButton, Button,
   Dialog, DialogTitle, DialogContent, DialogActions, TextField, Stack,
   Snackbar, Alert, Chip, Tooltip, ToggleButton, ToggleButtonGroup,
-  FormControlLabel, Switch, Divider
+  FormControlLabel, Switch, Divider, Box
 } from '@mui/material'
 import {
   Add as AddIcon,
@@ -15,12 +15,21 @@ import {
   SwapHoriz as SwapHorizIcon,
   Folder as FolderIcon,
   Lock as LockIcon,
+  ExpandMore as ExpandMoreIcon,
+  ChevronRight as ChevronRightIcon,
+  Language as LanguageIcon,
   EnhancedEncryption as EnhancedEncryptionIcon,
   UploadFile as UploadFileIcon
 } from '@mui/icons-material'
 import { CircularProgress } from '@mui/material'
 import Login from './Login'
 import ImportNginx from './ImportNginx'
+
+// abc.domainA.com -> domainA.com; domainA.com -> domainA.com
+const parentOf = (d) => {
+  const parts = d.split('.')
+  return parts.length <= 2 ? d : parts.slice(-2).join('.')
+}
 
 const empty = {
   domain: '', mode: 'proxy', target_ip: '', target_port: 80, static_dir: '',
@@ -35,6 +44,7 @@ export default function App() {
   const [error, setError] = useState('')
   const [ok, setOk] = useState('')
   const [certBusy, setCertBusy] = useState(null) // route id being issued
+  const [collapsed, setCollapsed] = useState({}) // parent domain -> bool
 
   const load = useCallback(async () => {
     try {
@@ -112,6 +122,14 @@ export default function App() {
   const set = (field) => (e) =>
     setDialog((d) => ({ ...d, route: { ...d.route, [field]: e.target.value } }))
 
+  // group routes by parent domain, groups and members sorted alphabetically
+  const groups = routes.reduce((acc, r) => {
+    const p = parentOf(r.domain)
+    ;(acc[p] = acc[p] || []).push(r)
+    return acc
+  }, {})
+  const parents = Object.keys(groups).sort()
+
   return (
     <>
       <AppBar position="static">
@@ -152,9 +170,26 @@ export default function App() {
                   </TableCell>
                 </TableRow>
               )}
-              {routes.map((r) => (
+              {parents.map((parent) => [
+                <TableRow key={parent} hover
+                  onClick={() => setCollapsed((c) => ({ ...c, [parent]: !c[parent] }))}
+                  sx={{ cursor: 'pointer', bgcolor: 'action.hover' }}>
+                  <TableCell colSpan={3} sx={{ py: 0.75 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      {collapsed[parent]
+                        ? <ChevronRightIcon fontSize="small" />
+                        : <ExpandMoreIcon fontSize="small" />}
+                      <LanguageIcon fontSize="small" color="primary" />
+                      <Typography variant="subtitle2">{parent}</Typography>
+                      <Chip size="small" variant="outlined"
+                        label={`${groups[parent].length} domain${groups[parent].length > 1 ? 's' : ''}`}
+                        sx={{ height: 20 }} />
+                    </Box>
+                  </TableCell>
+                </TableRow>,
+                ...(collapsed[parent] ? [] : groups[parent].map((r) => (
                 <TableRow key={r.id} hover>
-                  <TableCell>
+                  <TableCell sx={{ pl: 6 }}>
                     {r.domain}
                     {r.cert_file && r.key_file && (
                       <Tooltip title={r.force_ssl ? 'HTTPS (forced)' : 'HTTPS enabled'}>
@@ -194,7 +229,8 @@ export default function App() {
                     </Tooltip>
                   </TableCell>
                 </TableRow>
-              ))}
+                )))
+              ])}
             </TableBody>
           </Table>
         </TableContainer>
