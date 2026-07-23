@@ -1,0 +1,33 @@
+[Unit]
+Description=Nectar Gateway reverse proxy
+After=network.target
+
+[Service]
+User=nectar
+Group=nectar
+WorkingDirectory=/opt/nectar_gateway
+ExecStart=/opt/nectar_gateway/nectar_gateway
+Restart=always
+RestartSec=3
+# graceful shutdown: SIGTERM, then up to 35s for in-flight requests
+TimeoutStopSec=35
+LimitNOFILE=1048576
+# Go runtime: use the RAM, GC less often
+Environment=GOMEMLIMIT=28GiB
+Environment=GOGC=200
+Environment=PROXY_ADDR=:80
+Environment=HTTPS_ADDR=:443
+Environment=ADMIN_ADDR=:8081
+Environment=DB_PATH=/opt/nectar_gateway/nectar.db
+# Set real credentials here:
+Environment=ADMIN_USER=admin
+Environment=ADMIN_PASS=change-me
+# Let's Encrypt (certbot must be installed; see README for sudoers rule)
+Environment=CERTBOT_BIN="sudo -n certbot"
+Environment=CERTBOT_WEBROOT=/var/www/certbot
+Environment=CERTBOT_EMAIL=you@example.com
+# allow binding to ports 80/443 without root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

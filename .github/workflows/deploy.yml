@@ -1,0 +1,70 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  BINARY: nectar_gateway
+  DEPLOY_PATH: /opt/nectar_gateway
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64   # change to arm64 if your server is ARM
+        run: go build -trimpath -ldflags="-s -w" -o ${{ env.BINARY }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nectar_gateway
+          path: ${{ env.BINARY }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nectar_gateway
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload & restart
+        run: |
+          SSH="ssh -i ~/.ssh/id_deploy ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
+          scp -i ~/.ssh/id_deploy ${{ env.BINARY }} \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/${{ env.BINARY }}.new
+          $SSH "sudo install -m 755 /tmp/${{ env.BINARY }}.new ${{ env.DEPLOY_PATH }}/${{ env.BINARY }} \
+            && rm /tmp/${{ env.BINARY }}.new \
+            && sudo systemctl restart nectar_gateway \
+            && systemctl is-active nectar_gateway"

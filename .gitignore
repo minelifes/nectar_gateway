@@ -1,0 +1,7 @@
+nectar_gateway
+nectar.db
+ui/node_modules/
+.env
+test.nginx.conf
+ui/dist
+.idea
