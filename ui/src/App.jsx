@@ -4,7 +4,7 @@ import {
   TableCell, TableContainer, TableHead, TableRow, IconButton, Button,
   Dialog, DialogTitle, DialogContent, DialogActions, TextField, Stack,
   Snackbar, Alert, Chip, Tooltip, ToggleButton, ToggleButtonGroup,
-  FormControlLabel, Switch, Divider, Box
+  FormControlLabel, Switch, Divider, Box, InputAdornment
 } from '@mui/material'
 import {
   Add as AddIcon,
@@ -184,6 +184,16 @@ export default function App() {
                       <Chip size="small" variant="outlined"
                         label={`${groups[parent].length} domain${groups[parent].length > 1 ? 's' : ''}`}
                         sx={{ height: 20 }} />
+                      <Box sx={{ flexGrow: 1 }} />
+                      <Tooltip title={`Add subdomain of ${parent}`}>
+                        <IconButton size="small" color="primary"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setDialog({ mode: 'add', suffix: parent, route: { ...empty } })
+                          }}>
+                          <AddIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
                     </Box>
                   </TableCell>
                 </TableRow>,
@@ -237,11 +247,32 @@ export default function App() {
       </Container>
 
       <Dialog open={!!dialog} onClose={() => setDialog(null)} fullWidth maxWidth="xs">
-        <DialogTitle>{dialog?.mode === 'add' ? 'Add domain' : 'Edit domain'}</DialogTitle>
+        <DialogTitle>
+          {dialog?.mode === 'add'
+            ? (dialog?.suffix ? `Add subdomain of ${dialog.suffix}` : 'Add domain')
+            : 'Edit domain'}
+        </DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField label="Domain" placeholder="example.com" fullWidth autoFocus
-              value={dialog?.route.domain ?? ''} onChange={set('domain')} />
+            {dialog?.suffix ? (
+              <TextField label="Subdomain" placeholder="abc" fullWidth autoFocus
+                value={dialog?.route.domain
+                  ? dialog.route.domain.slice(0, dialog.route.domain.length - dialog.suffix.length - 1)
+                  : ''}
+                onChange={(e) => {
+                  const sub = e.target.value.trim().replace(/\.+$/, '').toLowerCase()
+                  setDialog((d) => ({
+                    ...d,
+                    route: { ...d.route, domain: sub ? `${sub}.${d.suffix}` : '' }
+                  }))
+                }}
+                InputProps={{
+                  endAdornment: <InputAdornment position="end">.{dialog.suffix}</InputAdornment>
+                }} />
+            ) : (
+              <TextField label="Domain" placeholder="example.com" fullWidth autoFocus
+                value={dialog?.route.domain ?? ''} onChange={set('domain')} />
+            )}
             <ToggleButtonGroup exclusive fullWidth color="primary" size="small"
               value={dialog?.route.mode ?? 'proxy'}
               onChange={(_, mode) => mode && setDialog((d) => ({ ...d, route: { ...d.route, mode } }))}>
