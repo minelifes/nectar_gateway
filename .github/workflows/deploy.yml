@@ -53,16 +53,20 @@ jobs:
           name: nectar_gateway
 
       - name: Setup SSH
+        env:
+          SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "$SSH_PORT" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Upload & restart
+        env:
+          SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
         run: |
-          SSH="ssh -i ~/.ssh/id_deploy ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
-          scp -i ~/.ssh/id_deploy ${{ env.BINARY }} \
+          SSH="ssh -i ~/.ssh/id_deploy -p $SSH_PORT ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
+          scp -i ~/.ssh/id_deploy -P $SSH_PORT ${{ env.BINARY }} \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/${{ env.BINARY }}.new
           $SSH "sudo install -m 755 /tmp/${{ env.BINARY }}.new ${{ env.DEPLOY_PATH }}/${{ env.BINARY }} \
             && rm /tmp/${{ env.BINARY }}.new \
