@@ -32,8 +32,8 @@ const parentOf = (d) => {
 }
 
 const empty = {
-  domain: '', mode: 'proxy', target_ip: '', target_port: 80, static_dir: '',
-  cert_file: '', key_file: '', force_ssl: false
+  domain: '', mode: 'proxy', target_ip: '', target_port: 80, target_https: false,
+  static_dir: '', cert_file: '', key_file: '', force_ssl: false
 }
 
 export default function App() {
@@ -211,7 +211,8 @@ export default function App() {
                     {r.mode === 'static' ? (
                       <Chip size="small" color="secondary" icon={<FolderIcon />} label={r.static_dir} />
                     ) : (
-                      <Chip size="small" icon={<SwapHorizIcon />} label={`${r.target_ip}:${r.target_port}`} />
+                      <Chip size="small" icon={<SwapHorizIcon />}
+                        label={`${r.target_https ? 'https://' : ''}${r.target_ip}:${r.target_port}`} />
                     )}
                   </TableCell>
                   <TableCell align="right">
@@ -285,6 +286,10 @@ export default function App() {
                   value={dialog?.route.target_ip ?? ''} onChange={set('target_ip')} />
                 <TextField label="Target port" type="number" fullWidth
                   value={dialog?.route.target_port ?? 80} onChange={set('target_port')} />
+                <FormControlLabel
+                  control={<Switch checked={!!dialog?.route.target_https}
+                    onChange={(e) => setDialog((d) => ({ ...d, route: { ...d.route, target_https: e.target.checked } }))} />}
+                  label="Backend uses HTTPS" />
               </>
             ) : (
               <TextField label="Static directory" placeholder="/var/www/example.com" fullWidth

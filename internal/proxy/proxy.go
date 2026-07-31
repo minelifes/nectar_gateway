@@ -43,7 +43,10 @@ func New(s *store.Store, acmeWebroot string) *Handler {
 		MaxIdleConns:          4096,
 		MaxIdleConnsPerHost:   1024, // default is 2 — far too low under load
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		// backends are addressed by IP and often use self-signed certs
+		// (equivalent of nginx's default proxy_ssl_verify off)
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     false,
 		WriteBufferSize:       64 << 10, // fewer syscalls on large bodies
@@ -57,8 +60,12 @@ func New(s *store.Store, acmeWebroot string) *Handler {
 		}},
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			route := pr.In.Context().Value(routeKey{}).(store.Route)
+			scheme := "http"
+			if route.TargetHTTPS {
+				scheme = "https"
+			}
 			target := &url.URL{
-				Scheme: "http",
+				Scheme: scheme,
 				Host:   net.JoinHostPort(route.TargetIP, fmt.Sprint(route.TargetPort)),
 			}
 			pr.SetURL(target)

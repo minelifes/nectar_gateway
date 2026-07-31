@@ -290,7 +290,7 @@ func extractServer(block []Directive, upstreams map[string]string, forceSSL map[
 		route := store.Route{Domain: name, CertFile: certFile, KeyFile: keyFile}
 		switch {
 		case proxyPass != "":
-			ip, port, err := resolveProxyPass(proxyPass, upstreams)
+			ip, port, https, err := resolveProxyPass(proxyPass, upstreams)
 			if err != nil {
 				res.Skipped = append(res.Skipped, fmt.Sprintf("%s: %v", name, err))
 				continue
@@ -298,6 +298,7 @@ func extractServer(block []Directive, upstreams map[string]string, forceSSL map[
 			route.Mode = store.ModeProxy
 			route.TargetIP = ip
 			route.TargetPort = port
+			route.TargetHTTPS = https
 		case rootDir != "":
 			route.Mode = store.ModeStatic
 			route.StaticDir = rootDir
@@ -309,28 +310,29 @@ func extractServer(block []Directive, upstreams map[string]string, forceSSL map[
 	}
 }
 
-func resolveProxyPass(raw string, upstreams map[string]string) (string, int, error) {
+func resolveProxyPass(raw string, upstreams map[string]string) (string, int, bool, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
-		return "", 0, fmt.Errorf("cannot parse proxy_pass %q", raw)
+		return "", 0, false, fmt.Errorf("cannot parse proxy_pass %q", raw)
 	}
 	host, portStr := u.Hostname(), u.Port()
+	https := u.Scheme == "https"
 
 	// upstream reference?
 	if target, ok := upstreams[host]; ok {
 		h, p, err := net.SplitHostPort(target)
 		if err != nil {
-			return target, 80, nil
+			return target, 80, https, nil
 		}
 		port, _ := strconv.Atoi(p)
-		return h, port, nil
+		return h, port, https, nil
 	}
 
 	port := 80
 	if portStr != "" {
 		port, _ = strconv.Atoi(portStr)
-	} else if u.Scheme == "https" {
+	} else if https {
 		port = 443
 	}
-	return host, port, nil
+	return host, port, https, nil
 }
