@@ -25,6 +25,16 @@ go build -o nectar_gateway .
 | `ADMIN_USER` / `ADMIN_PASS` | `admin` / `admin` | basic auth (empty `ADMIN_USER` disables auth) |
 | `DB_PATH` | `nectar.db` | SQLite database file |
 
+## SERVER CONFIG
+```bash
+sudo useradd -r -s /usr/sbin/nologin nectar
+sudo mkdir -p /opt/nectar_gateway && sudo chown nectar:nectar /opt/nectar_gateway
+sudo cp nectar_gateway.service /etc/systemd/system/   # edit ADMIN_PASS first
+sudo systemctl daemon-reload && sudo systemctl enable nectar_gateway
+# let the deploy user restart without a password prompt:
+echo "$USER ALL=NOPASSWD: /usr/bin/install -m 755 /tmp/nectar_gateway.new /opt/nectar_gateway/nectar_gateway, /usr/bin/systemctl restart nectar_gateway" | sudo tee /etc/sudoers.d/nectar-deploy
+```
+
 ## Let's Encrypt (certbot)
 
 The lock-plus button next to a domain runs certbot (HTTP-01 webroot challenge) and saves the cert paths on the route. Requirements: `certbot` installed, `PROXY_ADDR=:80` reachable from the internet, DNS pointing at the server. The proxy serves `/.well-known/acme-challenge/` automatically (before any HTTPS redirect).
