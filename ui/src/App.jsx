@@ -22,8 +22,10 @@ import {
   UploadFile as UploadFileIcon
 } from '@mui/icons-material'
 import { CircularProgress } from '@mui/material'
+import { GppBad as GppBadIcon, Dns as DnsListIcon } from '@mui/icons-material'
 import Login from './Login'
 import ImportNginx from './ImportNginx'
+import BlockedIps from './BlockedIps'
 
 // abc.domainA.com -> domainA.com; domainA.com -> domainA.com
 const parentOf = (d) => {
@@ -33,7 +35,7 @@ const parentOf = (d) => {
 
 const empty = {
   domain: '', mode: 'proxy', target_ip: '', target_port: 80, target_https: false,
-  static_dir: '', cert_file: '', key_file: '', force_ssl: false
+  rate_limit: 0, static_dir: '', cert_file: '', key_file: '', force_ssl: false
 }
 
 export default function App() {
@@ -45,6 +47,7 @@ export default function App() {
   const [ok, setOk] = useState('')
   const [certBusy, setCertBusy] = useState(null) // route id being issued
   const [collapsed, setCollapsed] = useState({}) // parent domain -> bool
+  const [view, setView] = useState('routes') // 'routes' | 'blocked'
 
   const load = useCallback(async () => {
     try {
@@ -85,7 +88,11 @@ export default function App() {
       const res = await fetch(url, {
         method: mode === 'add' ? 'POST' : 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...route, target_port: Number(route.target_port) || 80 })
+        body: JSON.stringify({
+          ...route,
+          target_port: Number(route.target_port) || 80,
+          rate_limit: Number(route.rate_limit) || 0
+        })
       })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(body.error || res.statusText)
@@ -144,6 +151,11 @@ export default function App() {
             onClick={() => setImportOpen(true)}>
             Import nginx
           </Button>
+          <Button color="inherit" sx={{ ml: 1 }}
+            startIcon={view === 'routes' ? <GppBadIcon /> : <DnsListIcon />}
+            onClick={() => setView(view === 'routes' ? 'blocked' : 'routes')}>
+            {view === 'routes' ? 'Blocked IPs' : 'Domains'}
+          </Button>
           <Tooltip title="Sign out">
             <IconButton color="inherit" onClick={logout} sx={{ ml: 1 }}>
               <LogoutIcon />
@@ -152,6 +164,9 @@ export default function App() {
         </Toolbar>
       </AppBar>
 
+      {view === 'blocked' && <BlockedIps onError={setError} />}
+
+      {view === 'routes' && (
       <Container maxWidth="md" sx={{ mt: 4 }}>
         <TableContainer component={Paper}>
           <Table>
@@ -214,6 +229,12 @@ export default function App() {
                       <Chip size="small" icon={<SwapHorizIcon />}
                         label={`${r.target_https ? 'https://' : ''}${r.target_ip}:${r.target_port}`} />
                     )}
+                    {r.rate_limit > 0 && (
+                      <Tooltip title={`Rate limit: ${r.rate_limit} req/s per IP, violators blocked 24h`}>
+                        <Chip size="small" variant="outlined" color="warning"
+                          label={`${r.rate_limit} r/s`} sx={{ ml: 0.75 }} />
+                      </Tooltip>
+                    )}
                   </TableCell>
                   <TableCell align="right">
                     {!(r.cert_file && r.key_file) && (
@@ -246,6 +267,7 @@ export default function App() {
           </Table>
         </TableContainer>
       </Container>
+      )}
 
       <Dialog open={!!dialog} onClose={() => setDialog(null)} fullWidth maxWidth="xs">
         <DialogTitle>
@@ -296,6 +318,9 @@ export default function App() {
                 helperText="Serves files from this folder (index.html for /)"
                 value={dialog?.route.static_dir ?? ''} onChange={set('static_dir')} />
             )}
+            <TextField label="Rate limit (req/s per IP)" type="number" fullWidth
+              helperText="0 = unlimited. IPs exceeding it are blocked for 24h. Note: browsers can burst 10+ req/s loading assets"
+              value={dialog?.route.rate_limit ?? 0} onChange={set('rate_limit')} />
             <Divider>
               <Typography variant="caption" color="text.secondary">SSL (optional)</Typography>
             </Divider>

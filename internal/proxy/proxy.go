@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -31,10 +32,16 @@ type Handler struct {
 	acmeWebroot string // dir served at /.well-known/acme-challenge/ over HTTP
 	certMu      sync.Mutex
 	certs       map[string]*cachedCert // domain -> cert
+	unknown     *hitTracker            // scanner detection on unknown domains
+	rate        *hitTracker            // per-domain per-IP rate limiting
 }
 
 func New(s *store.Store, acmeWebroot string) *Handler {
-	h := &Handler{store: s, acmeWebroot: acmeWebroot, certs: map[string]*cachedCert{}}
+	h := &Handler{
+		store: s, acmeWebroot: acmeWebroot, certs: map[string]*cachedCert{},
+		unknown: newHitTracker(10 * time.Minute),
+		rate:    newHitTracker(time.Second),
+	}
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
@@ -87,6 +94,13 @@ type bufferPool struct{ pool sync.Pool }
 func (b *bufferPool) Get() []byte  { return *b.pool.Get().(*[]byte) }
 func (b *bufferPool) Put(bb []byte) { b.pool.Put(&bb) }
 
+func clientIP(r *http.Request) string {
+	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return ip
+	}
+	return r.RemoteAddr
+}
+
 type routeKey struct{}
 
 func withRoute(ctx context.Context, r store.Route) context.Context {
@@ -102,13 +116,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ip := clientIP(r)
+	if h.store.IsBlocked(ip) {
+		http.Error(w, "403 Forbidden: your IP is temporarily blocked", http.StatusForbidden)
+		return
+	}
+	if isScannerPath(r.URL.Path) {
+		if err := h.store.Block(ip, "scanner path: "+r.URL.Path, BlockTTL); err == nil {
+			log.Printf("blocked %s for 24h: scanner path %s", ip, r.URL.Path)
+		}
+		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		return
+	}
+
 	host := r.Host
 	if hp, _, err := net.SplitHostPort(host); err == nil {
 		host = hp
 	}
 	route, ok := h.store.Lookup(strings.ToLower(host))
 	if !ok {
+		if h.unknown.note(ip, 30) {
+			if err := h.store.Block(ip, "domain scanning: repeated requests for unknown domains", BlockTTL); err == nil {
+				log.Printf("blocked %s for 24h: unknown-domain scanning", ip)
+			}
+			http.Error(w, "403 Forbidden", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "410 Gone: no route for domain "+host, http.StatusGone)
+		return
+	}
+	if route.RateLimit > 0 && h.rate.note(ip+"|"+route.Domain, route.RateLimit) {
+		if err := h.store.Block(ip, fmt.Sprintf("rate limit: more than %d req/s on %s", route.RateLimit, route.Domain), BlockTTL); err == nil {
+			log.Printf("blocked %s for 24h: rate limit on %s", ip, route.Domain)
+		}
+		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
 	}
 	if r.TLS == nil && route.ForceSSL && route.HasSSL() {

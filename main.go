@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"embed"
 	"errors"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -24,6 +26,17 @@ import (
 
 //go:embed all:ui/dist
 var uiFS embed.FS
+
+// tlsNoiseFilter drops "TLS handshake error" log lines — internet scanners
+// hitting :443 without SNI produce them constantly and they carry no signal.
+type tlsNoiseFilter struct{ w io.Writer }
+
+func (f tlsNoiseFilter) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) {
+		return len(p), nil
+	}
+	return f.w.Write(p)
+}
 
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -69,8 +82,14 @@ func main() {
 	}
 	go func() {
 		log.Printf("admin UI listening on %s (user: %s)", adminAddr, adminUser)
-		if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("admin: %v", err)
+		for {
+			err := adminSrv.ListenAndServe()
+			if errors.Is(err, http.ErrServerClosed) {
+				return
+			}
+			// never take the proxy down because the admin port failed
+			log.Printf("admin: %v (retrying in 5s)", err)
+			time.Sleep(5 * time.Second)
 		}
 	}()
 
@@ -84,6 +103,7 @@ func main() {
 			TLSConfig:         tlsCfg,
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
+			ErrorLog:          log.New(tlsNoiseFilter{log.Default().Writer()}, "", log.LstdFlags),
 		}
 	}
 
@@ -111,7 +131,7 @@ func main() {
 		log.Fatalf("proxy: %v", err)
 	}
 	log.Printf("proxy listening on %s (%d listeners)", proxyAddr, len(httpLs))
-	for _, l := range httpLs[1:] {
+	for _, l := range httpLs {
 		go func(l net.Listener) {
 			if err := httpSrv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("proxy: %v", err)
@@ -135,9 +155,8 @@ func main() {
 		close(done)
 	}()
 
-	if err := httpSrv.Serve(httpLs[0]); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("proxy: %v", err)
-	}
+	// Block until shutdown. A single listener error must not kill the
+	// process — the remaining listeners keep serving.
 	<-done
 	log.Printf("shutdown complete")
 }

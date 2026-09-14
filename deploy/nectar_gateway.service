@@ -1,6 +1,8 @@
 [Unit]
 Description=Nectar Gateway reverse proxy
 After=network.target
+# never give up restarting, even after repeated crashes
+StartLimitIntervalSec=0
 
 [Service]
 User=nectar
@@ -12,8 +14,9 @@ RestartSec=3
 # graceful shutdown: SIGTERM, then up to 35s for in-flight requests
 TimeoutStopSec=35
 LimitNOFILE=1048576
-# Go runtime: use the RAM, GC less often
-Environment=GOMEMLIMIT=28GiB
+# Go runtime: plenty for a proxy; a low limit prevents the kernel
+# OOM killer from targeting the gateway when backends eat the RAM
+Environment=GOMEMLIMIT=4GiB
 Environment=GOGC=200
 Environment=PROXY_ADDR=:80
 Environment=HTTPS_ADDR=:443

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +49,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/routes/{id}", s.requireAuth(s.deleteRoute))
 	mux.HandleFunc("POST /api/import/nginx", s.requireAuth(s.importNginx))
 	mux.HandleFunc("POST /api/routes/{id}/cert", s.requireAuth(s.issueCert))
+	mux.HandleFunc("GET /api/blocked", s.requireAuth(s.listBlocked))
+	mux.HandleFunc("DELETE /api/blocked/{ip}", s.requireAuth(s.unblockIP))
 	mux.Handle("/", s.uiHandler())
 	return mux
 }
@@ -268,6 +271,20 @@ func (s *Server) issueCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rt)
+}
+
+func (s *Server) listBlocked(w http.ResponseWriter, r *http.Request) {
+	list := s.store.ListBlocked()
+	sort.Slice(list, func(i, j int) bool { return list[i].BlockedAt.After(list[j].BlockedAt) })
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) unblockIP(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.Unblock(r.PathValue("ip")); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) deleteRoute(w http.ResponseWriter, r *http.Request) {
