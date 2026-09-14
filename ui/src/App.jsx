@@ -4,7 +4,7 @@ import {
   TableCell, TableContainer, TableHead, TableRow, IconButton, Button,
   Dialog, DialogTitle, DialogContent, DialogActions, TextField, Stack,
   Snackbar, Alert, Chip, Tooltip, ToggleButton, ToggleButtonGroup,
-  FormControlLabel, Switch, Divider, Box, InputAdornment
+  FormControlLabel, Switch, Divider, Box, InputAdornment, Tabs, Tab
 } from '@mui/material'
 import {
   Add as AddIcon,
@@ -143,25 +143,29 @@ export default function App() {
         <Toolbar>
           <DnsIcon sx={{ mr: 1.5 }} />
           <Typography variant="h6" sx={{ flexGrow: 1 }}>Nectar Gateway</Typography>
-          <Button color="inherit" startIcon={<AddIcon />}
-            onClick={() => setDialog({ mode: 'add', route: { ...empty } })}>
-            Add domain
-          </Button>
-          <Button color="inherit" startIcon={<UploadFileIcon />} sx={{ ml: 1 }}
-            onClick={() => setImportOpen(true)}>
-            Import nginx
-          </Button>
-          <Button color="inherit" sx={{ ml: 1 }}
-            startIcon={view === 'routes' ? <GppBadIcon /> : <DnsListIcon />}
-            onClick={() => setView(view === 'routes' ? 'blocked' : 'routes')}>
-            {view === 'routes' ? 'Blocked IPs' : 'Domains'}
-          </Button>
+          {view === 'routes' && (
+            <>
+              <Button color="inherit" startIcon={<AddIcon />}
+                onClick={() => setDialog({ mode: 'add', route: { ...empty } })}>
+                Add domain
+              </Button>
+              <Button color="inherit" startIcon={<UploadFileIcon />} sx={{ ml: 1 }}
+                onClick={() => setImportOpen(true)}>
+                Import nginx
+              </Button>
+            </>
+          )}
           <Tooltip title="Sign out">
             <IconButton color="inherit" onClick={logout} sx={{ ml: 1 }}>
               <LogoutIcon />
             </IconButton>
           </Tooltip>
         </Toolbar>
+        <Tabs value={view} onChange={(_, v) => setView(v)}
+          textColor="inherit" indicatorColor="secondary" sx={{ px: 2 }}>
+          <Tab value="routes" label="Domains" icon={<DnsListIcon />} iconPosition="start" sx={{ minHeight: 48 }} />
+          <Tab value="blocked" label="Blocked IPs" icon={<GppBadIcon />} iconPosition="start" sx={{ minHeight: 48 }} />
+        </Tabs>
       </AppBar>
 
       {view === 'blocked' && <BlockedIps onError={setError} />}
