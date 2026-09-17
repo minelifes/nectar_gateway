@@ -52,6 +52,12 @@ sudo chgrp -R nectar /etc/letsencrypt/live /etc/letsencrypt/archive && sudo chmo
 
 Renewal: certbot's standard systemd timer (`certbot renew`) keeps working — nectar reloads changed cert files automatically, no restart needed.
 
+## Health checks & push notifications
+
+Enable per domain in its settings (proxy mode): path, interval, and check type — HTTP status code, body-contains-text, or JSON field (`status=ok`, nested paths like `checks.db=up`). Two consecutive failures mark the backend DOWN and send a push; recovery sends another. Status dots show in the domain list.
+
+Push setup (ntfy, free): install the ntfy app ([Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy)/[iOS](https://apps.apple.com/us/app/ntfy/id1625396347)), subscribe to a topic with a hard-to-guess name (e.g. `nectar-a8f3k2`), then set `NOTIFY_URL=https://ntfy.sh/nectar-a8f3k2` in the service. Any webhook that accepts a plain-text POST (with `Title` header) works too.
+
 ## API
 
 `GET/POST /api/routes`, `PUT/DELETE /api/routes/{id}` — JSON `{domain, target_ip, target_port}`.

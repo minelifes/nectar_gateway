@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AppBar, Toolbar, Typography, Container, Paper, Table, TableBody,
   TableCell, TableContainer, TableHead, TableRow, IconButton, Button,
   Dialog, DialogTitle, DialogContent, DialogActions, TextField, Stack,
   Snackbar, Alert, Chip, Tooltip, ToggleButton, ToggleButtonGroup,
-  FormControlLabel, Switch, Divider, Box, InputAdornment, Tabs, Tab
+  FormControlLabel, Switch, Divider, Box, InputAdornment, Tabs, Tab,
+  Select, MenuItem, FormControl, InputLabel
 } from '@mui/material'
 import {
   Add as AddIcon,
@@ -22,7 +23,12 @@ import {
   UploadFile as UploadFileIcon
 } from '@mui/icons-material'
 import { CircularProgress } from '@mui/material'
-import { GppBad as GppBadIcon, Dns as DnsListIcon } from '@mui/icons-material'
+import {
+  GppBad as GppBadIcon,
+  Dns as DnsListIcon,
+  NotificationsActive as NotificationsActiveIcon,
+  NotificationsOff as NotificationsOffIcon
+} from '@mui/icons-material'
 import Login from './Login'
 import ImportNginx from './ImportNginx'
 import BlockedIps from './BlockedIps'
@@ -35,7 +41,33 @@ const parentOf = (d) => {
 
 const empty = {
   domain: '', mode: 'proxy', target_ip: '', target_port: 80, target_https: false,
-  rate_limit: 0, static_dir: '', cert_file: '', key_file: '', force_ssl: false
+  rate_limit: 0, static_dir: '', cert_file: '', key_file: '', force_ssl: false,
+  hc_enabled: false, hc_path: '/', hc_interval: 30, hc_type: 'status', hc_expect: ''
+}
+
+const hcExpectHelp = {
+  status: 'Expected status code, empty = any non-error (2xx/3xx)',
+  contains: 'Response body must contain this text',
+  json: 'field.path=value — e.g. status=ok or checks.db=up'
+}
+
+function HealthDot({ status, enabled }) {
+  const color = !enabled ? 'grey.600'
+    : status?.up === true ? 'success.main'
+    : status?.up === false ? 'error.main'
+    : 'grey.500'
+  const title = !enabled ? 'Health check disabled'
+    : status?.up === true ? 'Backend healthy'
+    : status?.up === false ? `Backend DOWN: ${status.last_error}`
+    : 'Waiting for first check'
+  return (
+    <Tooltip title={title}>
+      <Box component="span" sx={{
+        display: 'inline-block', width: 10, height: 10, borderRadius: '50%',
+        bgcolor: color, mr: 1, flexShrink: 0
+      }} />
+    </Tooltip>
+  )
 }
 
 export default function App() {
@@ -48,6 +80,34 @@ export default function App() {
   const [certBusy, setCertBusy] = useState(null) // route id being issued
   const [collapsed, setCollapsed] = useState({}) // parent domain -> bool
   const [view, setView] = useState('routes') // 'routes' | 'blocked'
+  const [healthMap, setHealthMap] = useState({})
+  const [notifOn, setNotifOn] = useState(
+    () => typeof Notification !== 'undefined' && Notification.permission === 'granted'
+      && localStorage.getItem('nectar_notif') === '1'
+  )
+  const prevHealth = useRef(null)
+  const routesRef = useRef([])
+  useEffect(() => { routesRef.current = routes }, [routes])
+
+  const toggleNotif = async () => {
+    if (typeof Notification === 'undefined') {
+      setError('Notifications need HTTPS (or localhost) — open the admin UI over HTTPS')
+      return
+    }
+    if (notifOn) {
+      localStorage.setItem('nectar_notif', '0')
+      setNotifOn(false)
+      return
+    }
+    const perm = await Notification.requestPermission()
+    if (perm === 'granted') {
+      localStorage.setItem('nectar_notif', '1')
+      setNotifOn(true)
+      new Notification('Nectar Gateway', { body: 'Browser notifications enabled — keep this tab open to receive alerts' })
+    } else {
+      setError('Notification permission denied — allow it in the browser site settings')
+    }
+  }
 
   const load = useCallback(async () => {
     try {
@@ -70,6 +130,37 @@ export default function App() {
     }).catch(() => setAuthed(false))
   }, [load])
 
+  useEffect(() => {
+    if (!authed) return
+    const notify = (title, body) => {
+      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+      if (localStorage.getItem('nectar_notif') !== '1') return
+      try { new Notification(title, { body, requireInteraction: true }) } catch { /* ignore */ }
+    }
+    const poll = () => fetch('/api/health')
+      .then((res) => res.ok ? res.json() : {})
+      .then((data) => {
+        const prev = prevHealth.current
+        if (prev) {
+          for (const [id, cur] of Object.entries(data)) {
+            const was = prev[id]
+            const domain = routesRef.current.find((r) => String(r.id) === id)?.domain || `route #${id}`
+            if (cur.up === false && was?.up !== false) {
+              notify(`🔴 ${domain} is DOWN`, cur.last_error || 'health check failed')
+            } else if (cur.up === true && was?.up === false) {
+              notify(`🟢 ${domain} recovered`, 'backend is healthy again')
+            }
+          }
+        }
+        prevHealth.current = data
+        setHealthMap(data)
+      })
+      .catch(() => {})
+    poll()
+    const t = setInterval(poll, 15000)
+    return () => clearInterval(t)
+  }, [authed])
+
   const logout = async () => {
     await fetch('/api/logout', { method: 'POST' })
     setAuthed(false)
@@ -91,7 +182,8 @@ export default function App() {
         body: JSON.stringify({
           ...route,
           target_port: Number(route.target_port) || 80,
-          rate_limit: Number(route.rate_limit) || 0
+          rate_limit: Number(route.rate_limit) || 0,
+          hc_interval: Number(route.hc_interval) || 30
         })
       })
       const body = await res.json().catch(() => ({}))
@@ -155,6 +247,11 @@ export default function App() {
               </Button>
             </>
           )}
+          <Tooltip title={notifOn ? 'Browser notifications on (works while this tab is open)' : 'Enable browser notifications for backend health'}>
+            <IconButton color="inherit" onClick={toggleNotif} sx={{ ml: 1 }}>
+              {notifOn ? <NotificationsActiveIcon /> : <NotificationsOffIcon />}
+            </IconButton>
+          </Tooltip>
           <Tooltip title="Sign out">
             <IconButton color="inherit" onClick={logout} sx={{ ml: 1 }}>
               <LogoutIcon />
@@ -219,6 +316,7 @@ export default function App() {
                 ...(collapsed[parent] ? [] : groups[parent].map((r) => (
                 <TableRow key={r.id} hover>
                   <TableCell sx={{ pl: 6 }}>
+                    {r.mode === 'proxy' && <HealthDot status={healthMap[String(r.id)]} enabled={r.hc_enabled} />}
                     {r.domain}
                     {r.cert_file && r.key_file && (
                       <Tooltip title={r.force_ssl ? 'HTTPS (forced)' : 'HTTPS enabled'}>
@@ -321,6 +419,39 @@ export default function App() {
               <TextField label="Static directory" placeholder="/var/www/example.com" fullWidth
                 helperText="Serves files from this folder (index.html for /)"
                 value={dialog?.route.static_dir ?? ''} onChange={set('static_dir')} />
+            )}
+            {(dialog?.route.mode ?? 'proxy') === 'proxy' && (
+              <>
+                <Divider>
+                  <Typography variant="caption" color="text.secondary">Health check</Typography>
+                </Divider>
+                <FormControlLabel
+                  control={<Switch checked={!!dialog?.route.hc_enabled}
+                    onChange={(e) => setDialog((d) => ({ ...d, route: { ...d.route, hc_enabled: e.target.checked } }))} />}
+                  label="Monitor backend, push notification when down" />
+                {dialog?.route.hc_enabled && (
+                  <>
+                    <Box sx={{ display: 'flex', gap: 2 }}>
+                      <TextField label="Path" placeholder="/health" sx={{ flex: 2 }}
+                        value={dialog?.route.hc_path ?? '/'} onChange={set('hc_path')} />
+                      <TextField label="Interval (s)" type="number" sx={{ flex: 1 }}
+                        value={dialog?.route.hc_interval ?? 30} onChange={set('hc_interval')} />
+                    </Box>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Check type</InputLabel>
+                      <Select label="Check type" value={dialog?.route.hc_type ?? 'status'}
+                        onChange={(e) => setDialog((d) => ({ ...d, route: { ...d.route, hc_type: e.target.value } }))}>
+                        <MenuItem value="status">HTTP status code</MenuItem>
+                        <MenuItem value="contains">Body contains text</MenuItem>
+                        <MenuItem value="json">JSON field equals value</MenuItem>
+                      </Select>
+                    </FormControl>
+                    <TextField label="Expectation" fullWidth
+                      helperText={hcExpectHelp[dialog?.route.hc_type ?? 'status']}
+                      value={dialog?.route.hc_expect ?? ''} onChange={set('hc_expect')} />
+                  </>
+                )}
+              </>
             )}
             <TextField label="Rate limit (req/s per IP)" type="number" fullWidth
               helperText="0 = unlimited. IPs exceeding it are blocked for 24h. Note: browsers can burst 10+ req/s loading assets"

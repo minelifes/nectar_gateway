@@ -24,6 +24,11 @@ type Route struct {
 	TargetHTTPS bool   `json:"target_https"` // connect to the backend over HTTPS
 	StaticDir  string `json:"static_dir"`
 	RateLimit  int    `json:"rate_limit"` // max requests/sec per IP (0 = unlimited)
+	HCEnabled  bool   `json:"hc_enabled"`  // health check enabled
+	HCPath     string `json:"hc_path"`     // path to probe, e.g. /health
+	HCInterval int    `json:"hc_interval"` // seconds between checks
+	HCType     string `json:"hc_type"`     // "status" | "contains" | "json"
+	HCExpect   string `json:"hc_expect"`   // expectation, meaning depends on hc_type
 	CertFile   string `json:"cert_file"` // path to fullchain PEM; enables HTTPS for the domain
 	KeyFile    string `json:"key_file"`  // path to private key PEM
 	ForceSSL   bool   `json:"force_ssl"` // redirect HTTP -> HTTPS
@@ -59,6 +64,11 @@ func New(path string) (*Store, error) {
 		target_port INTEGER NOT NULL DEFAULT 80,
 		target_https INTEGER NOT NULL DEFAULT 0,
 		rate_limit INTEGER NOT NULL DEFAULT 0,
+		hc_enabled INTEGER NOT NULL DEFAULT 0,
+		hc_path TEXT NOT NULL DEFAULT '/',
+		hc_interval INTEGER NOT NULL DEFAULT 30,
+		hc_type TEXT NOT NULL DEFAULT 'status',
+		hc_expect TEXT NOT NULL DEFAULT '',
 		static_dir TEXT NOT NULL DEFAULT '',
 		cert_file TEXT NOT NULL DEFAULT '',
 		key_file TEXT NOT NULL DEFAULT '',
@@ -74,6 +84,11 @@ func New(path string) (*Store, error) {
 	db.Exec(`ALTER TABLE routes ADD COLUMN force_ssl INTEGER NOT NULL DEFAULT 0`)
 	db.Exec(`ALTER TABLE routes ADD COLUMN target_https INTEGER NOT NULL DEFAULT 0`)
 	db.Exec(`ALTER TABLE routes ADD COLUMN rate_limit INTEGER NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE routes ADD COLUMN hc_enabled INTEGER NOT NULL DEFAULT 0`)
+	db.Exec(`ALTER TABLE routes ADD COLUMN hc_path TEXT NOT NULL DEFAULT '/'`)
+	db.Exec(`ALTER TABLE routes ADD COLUMN hc_interval INTEGER NOT NULL DEFAULT 30`)
+	db.Exec(`ALTER TABLE routes ADD COLUMN hc_type TEXT NOT NULL DEFAULT 'status'`)
+	db.Exec(`ALTER TABLE routes ADD COLUMN hc_expect TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS blocked_ips (
 		ip TEXT PRIMARY KEY,
 		reason TEXT NOT NULL DEFAULT '',
@@ -168,7 +183,7 @@ func (s *Store) ListBlocked() []BlockedIP {
 }
 
 func (s *Store) reload() error {
-	rows, err := s.db.Query(`SELECT id, domain, mode, target_ip, target_port, target_https, rate_limit, static_dir, cert_file, key_file, force_ssl FROM routes`)
+	rows, err := s.db.Query(`SELECT id, domain, mode, target_ip, target_port, target_https, rate_limit, hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl FROM routes`)
 	if err != nil {
 		return err
 	}
@@ -176,7 +191,7 @@ func (s *Store) reload() error {
 	cache := map[string]Route{}
 	for rows.Next() {
 		var r Route
-		if err := rows.Scan(&r.ID, &r.Domain, &r.Mode, &r.TargetIP, &r.TargetPort, &r.TargetHTTPS, &r.RateLimit, &r.StaticDir, &r.CertFile, &r.KeyFile, &r.ForceSSL); err != nil {
+		if err := rows.Scan(&r.ID, &r.Domain, &r.Mode, &r.TargetIP, &r.TargetPort, &r.TargetHTTPS, &r.RateLimit, &r.HCEnabled, &r.HCPath, &r.HCInterval, &r.HCType, &r.HCExpect, &r.StaticDir, &r.CertFile, &r.KeyFile, &r.ForceSSL); err != nil {
 			return err
 		}
 		cache[r.Domain] = r
@@ -208,7 +223,7 @@ func (s *Store) Get(id int64) (Route, bool) {
 }
 
 func (s *Store) List() ([]Route, error) {
-	rows, err := s.db.Query(`SELECT id, domain, mode, target_ip, target_port, target_https, rate_limit, static_dir, cert_file, key_file, force_ssl FROM routes ORDER BY domain`)
+	rows, err := s.db.Query(`SELECT id, domain, mode, target_ip, target_port, target_https, rate_limit, hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl FROM routes ORDER BY domain`)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +231,7 @@ func (s *Store) List() ([]Route, error) {
 	out := []Route{}
 	for rows.Next() {
 		var r Route
-		if err := rows.Scan(&r.ID, &r.Domain, &r.Mode, &r.TargetIP, &r.TargetPort, &r.TargetHTTPS, &r.RateLimit, &r.StaticDir, &r.CertFile, &r.KeyFile, &r.ForceSSL); err != nil {
+		if err := rows.Scan(&r.ID, &r.Domain, &r.Mode, &r.TargetIP, &r.TargetPort, &r.TargetHTTPS, &r.RateLimit, &r.HCEnabled, &r.HCPath, &r.HCInterval, &r.HCType, &r.HCExpect, &r.StaticDir, &r.CertFile, &r.KeyFile, &r.ForceSSL); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -252,6 +267,20 @@ func normalize(r *Route) error {
 	if r.RateLimit < 0 {
 		r.RateLimit = 0
 	}
+	r.HCPath = strings.TrimSpace(r.HCPath)
+	if r.HCPath == "" {
+		r.HCPath = "/"
+	} else if !strings.HasPrefix(r.HCPath, "/") {
+		r.HCPath = "/" + r.HCPath
+	}
+	if r.HCInterval < 5 {
+		r.HCInterval = 30
+	}
+	switch r.HCType {
+	case "status", "contains", "json":
+	default:
+		r.HCType = "status"
+	}
 	r.CertFile = strings.TrimSpace(r.CertFile)
 	r.KeyFile = strings.TrimSpace(r.KeyFile)
 	if (r.CertFile == "") != (r.KeyFile == "") {
@@ -267,8 +296,8 @@ func (s *Store) Create(r *Route) error {
 	if err := normalize(r); err != nil {
 		return err
 	}
-	res, err := s.db.Exec(`INSERT INTO routes (domain, mode, target_ip, target_port, target_https, rate_limit, static_dir, cert_file, key_file, force_ssl) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.Domain, r.Mode, r.TargetIP, r.TargetPort, r.TargetHTTPS, r.RateLimit, r.StaticDir, r.CertFile, r.KeyFile, r.ForceSSL)
+	res, err := s.db.Exec(`INSERT INTO routes (domain, mode, target_ip, target_port, target_https, rate_limit, hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.Domain, r.Mode, r.TargetIP, r.TargetPort, r.TargetHTTPS, r.RateLimit, r.HCEnabled, r.HCPath, r.HCInterval, r.HCType, r.HCExpect, r.StaticDir, r.CertFile, r.KeyFile, r.ForceSSL)
 	if err != nil {
 		return err
 	}
@@ -280,8 +309,8 @@ func (s *Store) Update(r *Route) error {
 	if err := normalize(r); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`UPDATE routes SET domain=?, mode=?, target_ip=?, target_port=?, target_https=?, rate_limit=?, static_dir=?, cert_file=?, key_file=?, force_ssl=? WHERE id=?`,
-		r.Domain, r.Mode, r.TargetIP, r.TargetPort, r.TargetHTTPS, r.RateLimit, r.StaticDir, r.CertFile, r.KeyFile, r.ForceSSL, r.ID)
+	_, err := s.db.Exec(`UPDATE routes SET domain=?, mode=?, target_ip=?, target_port=?, target_https=?, rate_limit=?, hc_enabled=?, hc_path=?, hc_interval=?, hc_type=?, hc_expect=?, static_dir=?, cert_file=?, key_file=?, force_ssl=? WHERE id=?`,
+		r.Domain, r.Mode, r.TargetIP, r.TargetPort, r.TargetHTTPS, r.RateLimit, r.HCEnabled, r.HCPath, r.HCInterval, r.HCType, r.HCExpect, r.StaticDir, r.CertFile, r.KeyFile, r.ForceSSL, r.ID)
 	if err != nil {
 		return err
 	}

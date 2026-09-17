@@ -29,6 +29,8 @@ Environment=ADMIN_PASS=change-me
 Environment=CERTBOT_BIN="sudo -n certbot"
 Environment=CERTBOT_WEBROOT=/var/www/certbot
 Environment=CERTBOT_EMAIL=you@example.com
+# push notifications for backend health (ntfy.sh topic or compatible webhook)
+# Environment=NOTIFY_URL=https://ntfy.sh/your-secret-topic-name
 # allow binding to ports 80/443 without root
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"nectar_gateway/internal/certbot"
+	"nectar_gateway/internal/health"
 	"nectar_gateway/internal/nginx"
 	"nectar_gateway/internal/store"
 )
@@ -28,12 +29,13 @@ type Server struct {
 	pass     string
 	ui       fs.FS
 	certbot  certbot.Config
+	health   *health.Checker
 	mu       sync.Mutex
 	sessions map[string]time.Time // token -> expiry
 }
 
-func New(s *store.Store, user, pass string, ui fs.FS, cb certbot.Config) *Server {
-	return &Server{store: s, user: user, pass: pass, ui: ui, certbot: cb, sessions: map[string]time.Time{}}
+func New(s *store.Store, user, pass string, ui fs.FS, cb certbot.Config, hc *health.Checker) *Server {
+	return &Server{store: s, user: user, pass: pass, ui: ui, certbot: cb, health: hc, sessions: map[string]time.Time{}}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -49,6 +51,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/routes/{id}", s.requireAuth(s.deleteRoute))
 	mux.HandleFunc("POST /api/import/nginx", s.requireAuth(s.importNginx))
 	mux.HandleFunc("POST /api/routes/{id}/cert", s.requireAuth(s.issueCert))
+	mux.HandleFunc("GET /api/health", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, s.health.Snapshot())
+	}))
 	mux.HandleFunc("GET /api/blocked", s.requireAuth(s.listBlocked))
 	mux.HandleFunc("DELETE /api/blocked/{ip}", s.requireAuth(s.unblockIP))
 	mux.Handle("/", s.uiHandler())

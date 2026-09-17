@@ -20,6 +20,7 @@ import (
 
 	"nectar_gateway/internal/api"
 	"nectar_gateway/internal/certbot"
+	"nectar_gateway/internal/health"
 	"nectar_gateway/internal/proxy"
 	"nectar_gateway/internal/store"
 )
@@ -76,9 +77,14 @@ func main() {
 		log.Fatalf("ui fs: %v", err)
 	}
 
+	hc := health.New(st, os.Getenv("NOTIFY_URL"))
+	hcCtx, hcCancel := context.WithCancel(context.Background())
+	defer hcCancel()
+	go hc.Run(hcCtx)
+
 	adminSrv := &http.Server{
 		Addr:    adminAddr,
-		Handler: api.New(st, adminUser, adminPass, ui, cb).Handler(),
+		Handler: api.New(st, adminUser, adminPass, ui, cb, hc).Handler(),
 	}
 	go func() {
 		log.Printf("admin UI listening on %s (user: %s)", adminAddr, adminUser)
