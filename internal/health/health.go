@@ -179,20 +179,37 @@ func (c *Checker) probe(r store.Route) error {
 		if resp.StatusCode >= 400 {
 			return fmt.Errorf("status %d", resp.StatusCode)
 		}
-		field, want, ok := strings.Cut(r.HCExpect, "=")
-		if !ok {
-			return fmt.Errorf("invalid json expectation %q (use field.path=value)", r.HCExpect)
-		}
 		var data any
 		if err := json.Unmarshal(body, &data); err != nil {
 			return fmt.Errorf("invalid JSON response: %v", err)
 		}
-		got, err := jsonPath(data, strings.TrimSpace(field))
-		if err != nil {
-			return err
-		}
-		if fmt.Sprint(got) != strings.TrimSpace(want) {
-			return fmt.Errorf("%s = %q, expected %q", field, fmt.Sprint(got), want)
+		// several conditions separated by ';' — all must hold;
+		// a value may list alternatives with '|': status=ok|degraded
+		for _, cond := range strings.Split(r.HCExpect, ";") {
+			cond = strings.TrimSpace(cond)
+			if cond == "" {
+				continue
+			}
+			field, want, ok := strings.Cut(cond, "=")
+			if !ok {
+				return fmt.Errorf("invalid json expectation %q (use field.path=value; other.path=value)", cond)
+			}
+			field = strings.TrimSpace(field)
+			got, err := jsonPath(data, field)
+			if err != nil {
+				return err
+			}
+			gotStr := fmt.Sprint(got)
+			matched := false
+			for _, alt := range strings.Split(want, "|") {
+				if gotStr == strings.TrimSpace(alt) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("%s = %q, expected %q", field, gotStr, strings.TrimSpace(want))
+			}
 		}
 	default: // "status"
 		if want := strings.TrimSpace(r.HCExpect); want != "" {

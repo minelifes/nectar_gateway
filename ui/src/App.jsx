@@ -48,7 +48,7 @@ const empty = {
 const hcExpectHelp = {
   status: 'Expected status code, empty = any non-error (2xx/3xx)',
   contains: 'Response body must contain this text',
-  json: 'field.path=value — e.g. status=ok or checks.db=up'
+  json: 'field=value; other=value — all must match. Alternatives with |: status=ok|degraded; checks.db=up'
 }
 
 function HealthDot({ status, enabled }) {
