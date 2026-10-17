@@ -1,7 +1,7 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import 'models.dart';
 import 'monitor.dart' show MonitorState;
@@ -14,16 +14,32 @@ class AuthTokens {
   final DateTime accessExpiresAt;
 }
 
-/// Persistent storage shared by the UI isolate and the background isolate.
-///
-/// - tokens           -> flutter_secure_storage (Keychain / Keystore)
-/// - everything else  -> SharedPreferencesAsync (no per-isolate cache, so the
-///                       foreground and background isolates always agree)
+/// Small key/value helper on top of flutter_secure_storage. Every read goes to
+/// the platform (no per-isolate cache), so the UI isolate and the background
+/// isolates always agree. Replaces shared_preferences, whose Android plugin
+/// threw NoSuchMethodError on some builds.
+class _Prefs {
+  _Prefs(this._s);
+  final FlutterSecureStorage _s;
+
+  Future<String?> getString(String k) => _s.read(key: k);
+  Future<void> setString(String k, String v) => _s.write(key: k, value: v);
+  Future<bool?> getBool(String k) async {
+    final v = await _s.read(key: k);
+    return v == null ? null : v == 'true';
+  }
+
+  Future<void> setBool(String k, bool v) => _s.write(key: k, value: '$v');
+  Future<void> remove(String k) => _s.delete(key: k);
+}
+
+/// Persistent storage shared by the UI isolate and the background isolate
+/// (everything lives in the Keychain / Keystore-backed secure storage).
 class Storage {
   Storage();
 
   static final FlutterSecureStorage _secure = FlutterSecureStorage();
-  static final SharedPreferencesAsync _prefs = SharedPreferencesAsync();
+  static final _Prefs _prefs = _Prefs(_secure);
 
   static const _kUrl = 'server_url';
   static const _kUser = 'username';
@@ -48,7 +64,13 @@ class Storage {
   // ---- settings ----
 
   /// "Fast monitoring": 60 s checks via an Android foreground service.
-  Future<bool> fastMode() async => (await _prefs.getBool(_kFast)) ?? false;
+  /// On by default on Android (without it checks only run ~every 15 min and
+  /// the app is not shown as running); the user can switch it off.
+  Future<bool> fastMode() async => (await _prefs.getBool(_kFast)) ?? Platform.isAndroid;
+
+  /// One-time "allow unrestricted battery" prompt shown?
+  Future<bool> batteryPromptShown() async => (await _prefs.getBool('battery_prompt')) ?? false;
+  Future<void> setBatteryPromptShown() => _prefs.setBool('battery_prompt', true);
   Future<void> setFastMode(bool on) => _prefs.setBool(_kFast, on);
 
   // ---- tokens ----

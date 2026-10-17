@@ -1,7 +1,7 @@
 name: nectar_mobile
 description: Mobile monitor for Nectar Gateway - live backend status and outage notifications.
 publish_to: none
-version: 1.0.0+1
+version: 1.0.2+2
 
 environment:
   sdk: ">=3.12.0 <4.0.0" # required by flutter_foreground_task 11 (Flutter 3.44+)
@@ -11,7 +11,6 @@ dependencies:
     sdk: flutter
   http: ^1.6.0
   flutter_secure_storage: ^11.2.0
-  shared_preferences: ^2.5.6
   flutter_local_notifications: ^22.3.2
   workmanager: ^0.10.10
   flutter_foreground_task: ^11.0.3
@@ -22,3 +21,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon/logo.png

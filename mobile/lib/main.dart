@@ -83,6 +83,7 @@ class _NectarAppState extends State<NectarApp> {
     }
 
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'Nectar Gateway',
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),

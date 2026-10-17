@@ -93,10 +93,11 @@ class _LoginScreenState extends State<LoginScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundColor: scheme.primary,
-                    child: Icon(Icons.dns, color: scheme.onPrimary, size: 30),
+                  Center(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(20),
+                      child: Image.asset('assets/icon/logo.png', width: 88, height: 88),
+                    ),
                   ),
                   const SizedBox(height: 16),
                   Text('Nectar Gateway',

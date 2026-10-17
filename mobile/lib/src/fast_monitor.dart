@@ -88,6 +88,9 @@ class FastMonitorHandler extends TaskHandler {
 class FastMonitor {
   static bool get supported => Platform.isAndroid;
 
+  /// Why the last start() failed (shown to the user).
+  static String? lastError;
+
   /// Call once from main(), before runApp.
   static void initPort() {
     if (supported) FlutterForegroundTask.initCommunicationPort();
@@ -118,15 +121,22 @@ class FastMonitor {
   static Future<bool> start() async {
     if (!supported) return false;
     _init();
-    if (await FlutterForegroundTask.isRunningService) {
-      await FlutterForegroundTask.restartService();
-    } else {
-      await FlutterForegroundTask.startService(
-        serviceId: kFastServiceId,
-        notificationTitle: 'Nectar monitor',
-        notificationText: 'Starting…',
-        callback: fastMonitorCallback,
-      );
+    lastError = null;
+    try {
+      final ServiceRequestResult r;
+      if (await FlutterForegroundTask.isRunningService) {
+        r = await FlutterForegroundTask.restartService();
+      } else {
+        r = await FlutterForegroundTask.startService(
+          serviceId: kFastServiceId,
+          notificationTitle: 'Nectar monitor',
+          notificationText: 'Starting…',
+          callback: fastMonitorCallback,
+        );
+      }
+      if (r is ServiceRequestFailure) lastError = '${r.error}';
+    } catch (e) {
+      lastError = '$e';
     }
     return FlutterForegroundTask.isRunningService;
   }

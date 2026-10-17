@@ -1,8 +1,7 @@
 import { useState } from 'react'
 import {
-  Box, Paper, Typography, TextField, Button, Alert, Avatar, Stack
+  Box, Paper, Typography, TextField, Button, Alert, Stack
 } from '@mui/material'
-import { LockOutlined as LockOutlinedIcon } from '@mui/icons-material'
 
 export default function Login({ onLogin }) {
   const [username, setUsername] = useState('')
@@ -39,9 +38,7 @@ export default function Login({ onLogin }) {
     }}>
       <Paper elevation={6} sx={{ p: 4, width: 360 }}>
         <Stack alignItems="center" spacing={1} sx={{ mb: 3 }}>
-          <Avatar sx={{ bgcolor: 'primary.main' }}>
-            <LockOutlinedIcon />
-          </Avatar>
+          <Box component="img" src="/icon-192.png" alt="Nectar" sx={{ width: 72, height: 72, borderRadius: '18px' }} />
           <Typography variant="h5">Nectar Gateway</Typography>
           <Typography variant="body2" color="text.secondary">
             Sign in to manage your domains

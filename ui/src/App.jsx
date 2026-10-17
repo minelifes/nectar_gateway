@@ -11,7 +11,6 @@ import {
   Add as AddIcon,
   Edit as EditIcon,
   Delete as DeleteIcon,
-  Dns as DnsIcon,
   Logout as LogoutIcon,
   SwapHoriz as SwapHorizIcon,
   Folder as FolderIcon,
@@ -233,7 +232,8 @@ export default function App() {
     <>
       <AppBar position="static">
         <Toolbar>
-          <DnsIcon sx={{ mr: 1.5 }} />
+          <Box component="img" src="/icon-192.png" alt="Nectar"
+            sx={{ width: 32, height: 32, borderRadius: '8px', mr: 1.5 }} />
           <Typography variant="h6" sx={{ flexGrow: 1 }}>Nectar Gateway</Typography>
           {view === 'routes' && (
             <>

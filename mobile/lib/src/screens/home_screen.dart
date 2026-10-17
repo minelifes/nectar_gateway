@@ -11,6 +11,7 @@ import '../notifier.dart';
 import '../storage.dart';
 import 'blocked_screen.dart';
 import 'import_nginx_screen.dart';
+import 'permissions_screen.dart';
 import 'route_edit_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -58,7 +59,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
     _startTimer();
     unawaited(_checkNotifications());
+    unawaited(_promptPermissions());
     await _refresh();
+  }
+
+  /// Once, on first launch: show the permissions checklist if anything is missing.
+  Future<void> _promptPermissions() async {
+    if (await _storage.batteryPromptShown()) return;
+    if (await PermissionsScreen.allGranted()) {
+      await _storage.setBatteryPromptShown();
+      return;
+    }
+    await _storage.setBatteryPromptShown();
+    if (mounted) await _openPermissions();
+  }
+
+  Future<void> _openPermissions() async {
+    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const PermissionsScreen()));
+    unawaited(_checkNotifications());
   }
 
   @override
@@ -197,7 +215,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       await _storage.setFastMode(false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not start the monitoring service')),
+          SnackBar(
+            duration: const Duration(seconds: 8),
+            content: Text('Could not start the monitoring service'
+                '${FastMonitor.lastError == null ? '' : ': ${FastMonitor.lastError}'}'),
+          ),
         );
       }
     }
@@ -248,7 +270,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final snap = _snapshot;
     return Scaffold(
       appBar: AppBar(
-        title: Text(_tab == 0 ? 'Nectar Gateway' : 'Blocked IPs'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(7),
+              child: Image.asset('assets/icon/logo.png', width: 28, height: 28),
+            ),
+            const SizedBox(width: 10),
+            Text(_tab == 0 ? 'Nectar Gateway' : 'Blocked IPs'),
+          ],
+        ),
         actions: [
           if (_tab == 0 && _refreshing)
             const Padding(
@@ -262,6 +294,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               switch (v) {
                 case 'import':
                   _openImport();
+                case 'permissions':
+                  _openPermissions();
                 case 'settings':
                   _openSettings();
                 case 'signout':
@@ -270,6 +304,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             },
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'import', child: ListTile(leading: Icon(Icons.upload_file), title: Text('Import from nginx'))),
+              PopupMenuItem(value: 'permissions', child: ListTile(leading: Icon(Icons.verified_user_outlined), title: Text('Permissions'))),
               PopupMenuItem(value: 'settings', child: ListTile(leading: Icon(Icons.tune), title: Text('Monitoring settings'))),
               PopupMenuItem(value: 'signout', child: ListTile(leading: Icon(Icons.logout), title: Text('Sign out'))),
             ],
