@@ -89,6 +89,13 @@ func New(path string) (*Store, error) {
 	db.Exec(`ALTER TABLE routes ADD COLUMN hc_interval INTEGER NOT NULL DEFAULT 30`)
 	db.Exec(`ALTER TABLE routes ADD COLUMN hc_type TEXT NOT NULL DEFAULT 'status'`)
 	db.Exec(`ALTER TABLE routes ADD COLUMN hc_expect TEXT NOT NULL DEFAULT ''`)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS refresh_tokens (
+		hash TEXT PRIMARY KEY,
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL
+	)`); err != nil {
+		return nil, err
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS blocked_ips (
 		ip TEXT PRIMARY KEY,
 		reason TEXT NOT NULL DEFAULT '',
@@ -105,6 +112,33 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// ---- mobile refresh tokens (only SHA-256 hashes are stored) ----
+
+func (s *Store) CreateRefreshToken(hash string, ttl time.Duration) error {
+	now := time.Now()
+	s.db.Exec(`DELETE FROM refresh_tokens WHERE expires_at < ?`, now.Unix())
+	_, err := s.db.Exec(`INSERT INTO refresh_tokens (hash, created_at, expires_at) VALUES (?, ?, ?)`,
+		hash, now.Unix(), now.Add(ttl).Unix())
+	return err
+}
+
+// TouchRefreshToken validates the token and slides its expiry forward.
+func (s *Store) TouchRefreshToken(hash string, ttl time.Duration) (bool, error) {
+	now := time.Now()
+	res, err := s.db.Exec(`UPDATE refresh_tokens SET expires_at = ? WHERE hash = ? AND expires_at > ?`,
+		now.Add(ttl).Unix(), hash, now.Unix())
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (s *Store) DeleteRefreshToken(hash string) error {
+	_, err := s.db.Exec(`DELETE FROM refresh_tokens WHERE hash = ?`, hash)
+	return err
 }
 
 // ---- IP blocklist ----

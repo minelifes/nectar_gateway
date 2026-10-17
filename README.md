@@ -58,6 +58,10 @@ Enable per domain in its settings (proxy mode): path, interval, and check type �
 
 Push setup (ntfy, free): install the ntfy app ([Android](https://play.google.com/store/apps/details?id=io.heckel.ntfy)/[iOS](https://apps.apple.com/us/app/ntfy/id1625396347)), subscribe to a topic with a hard-to-guess name (e.g. `nectar-a8f3k2`), then set `NOTIFY_URL=https://ntfy.sh/nectar-a8f3k2` in the service. Any webhook that accepts a plain-text POST (with `Title` header) works too.
 
+## Mobile app
+
+`mobile/` contains a Flutter app (Android + iOS) with live status and outage notifications — see [mobile/README.md](mobile/README.md). It authenticates with token endpoints on the admin port: `POST /api/auth/login` (`{username, password}` → `access_token` 15 min + `refresh_token` 30 days, sliding), `POST /api/auth/refresh`, `POST /api/auth/logout`; API calls then use `Authorization: Bearer <access_token>`. Refresh tokens are stored hashed in SQLite; failed logins are rate-limited (10 per 15 min per IP) on both the web and mobile login.
+
 ## API
 
 `GET/POST /api/routes`, `PUT/DELETE /api/routes/{id}` — JSON `{domain, target_ip, target_port}`.

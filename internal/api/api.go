@@ -31,17 +31,27 @@ type Server struct {
 	certbot  certbot.Config
 	health   *health.Checker
 	mu       sync.Mutex
-	sessions map[string]time.Time // token -> expiry
+	sessions map[string]time.Time // web cookie session token -> expiry
+	access   map[string]time.Time // mobile access token -> expiry
+	limiter  *loginLimiter
 }
 
 func New(s *store.Store, user, pass string, ui fs.FS, cb certbot.Config, hc *health.Checker) *Server {
-	return &Server{store: s, user: user, pass: pass, ui: ui, certbot: cb, health: hc, sessions: map[string]time.Time{}}
+	return &Server{
+		store: s, user: user, pass: pass, ui: ui, certbot: cb, health: hc,
+		sessions: map[string]time.Time{},
+		access:   map[string]time.Time{},
+		limiter:  newLoginLimiter(),
+	}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.logout)
+	mux.HandleFunc("POST /api/auth/login", s.tokenLogin)
+	mux.HandleFunc("POST /api/auth/refresh", s.tokenRefresh)
+	mux.HandleFunc("POST /api/auth/logout", s.tokenLogout)
 	mux.HandleFunc("GET /api/me", s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"user": s.user})
 	}))
@@ -65,6 +75,9 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) authed(r *http.Request) bool {
 	if s.user == "" { // auth disabled
 		return true
+	}
+	if tok, ok := bearerToken(r); ok { // mobile app
+		return s.validAccess(tok)
 	}
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
@@ -94,6 +107,11 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	ip := clientHost(r)
+	if !s.limiter.allow(ip) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many failed attempts, try again later"})
+		return
+	}
 	var creds struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -104,9 +122,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if subtle.ConstantTimeCompare([]byte(creds.Username), []byte(s.user)) != 1 ||
 		subtle.ConstantTimeCompare([]byte(creds.Password), []byte(s.pass)) != 1 {
+		s.limiter.fail(ip)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
+	s.limiter.reset(ip)
 	buf := make([]byte, 32)
 	rand.Read(buf)
 	token := hex.EncodeToString(buf)
