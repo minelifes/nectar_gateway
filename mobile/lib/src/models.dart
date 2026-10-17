@@ -6,7 +6,11 @@ class RouteInfo {
     required this.targetLabel,
     required this.hcEnabled,
     required this.hasSsl,
+    this.raw = const {},
   });
+
+  /// Full route object as sent by the API (used by the edit form).
+  final Map<String, dynamic> raw;
 
   final int id;
   final String domain;
@@ -39,6 +43,7 @@ class RouteInfo {
       hcEnabled: j['hc_enabled'] == true,
       hasSsl: ((j['cert_file'] as String?) ?? '').isNotEmpty &&
           ((j['key_file'] as String?) ?? '').isNotEmpty,
+      raw: Map<String, dynamic>.from(j),
     );
   }
 
@@ -49,6 +54,7 @@ class RouteInfo {
         'target_label': targetLabel,
         'hc_enabled': hcEnabled,
         'has_ssl': hasSsl,
+        'raw': raw,
       };
 
   factory RouteInfo.fromJson(Map<String, dynamic> j) => RouteInfo(
@@ -58,7 +64,49 @@ class RouteInfo {
         targetLabel: j['target_label'] as String,
         hcEnabled: j['hc_enabled'] as bool,
         hasSsl: j['has_ssl'] as bool,
+        raw: (j['raw'] as Map?)?.cast<String, dynamic>() ?? const {},
       );
+}
+
+/// Result of an nginx config import / preview.
+class ImportResult {
+  const ImportResult({required this.routes, required this.skipped});
+  final List<Map<String, dynamic>> routes;
+  final List<String> skipped;
+
+  factory ImportResult.fromApi(Map<String, dynamic> j) => ImportResult(
+        routes: [for (final r in (j['routes'] as List? ?? const [])) (r as Map).cast<String, dynamic>()],
+        skipped: [for (final s in (j['skipped'] as List? ?? const [])) '$s'],
+      );
+}
+
+class BlockedIp {
+  const BlockedIp({
+    required this.ip,
+    required this.reason,
+    required this.blockedAt,
+    required this.expiresAt,
+  });
+
+  final String ip;
+  final String reason;
+  final DateTime blockedAt;
+  final DateTime expiresAt;
+
+  /// Parses an entry of GET /api/blocked (also used for the local cache).
+  factory BlockedIp.fromJson(Map<String, dynamic> j) => BlockedIp(
+        ip: j['ip'] as String,
+        reason: (j['reason'] as String?) ?? '',
+        blockedAt: DateTime.parse(j['blocked_at'] as String).toLocal(),
+        expiresAt: DateTime.parse(j['expires_at'] as String).toLocal(),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'ip': ip,
+        'reason': reason,
+        'blocked_at': blockedAt.toUtc().toIso8601String(),
+        'expires_at': expiresAt.toUtc().toIso8601String(),
+      };
 }
 
 class HealthInfo {

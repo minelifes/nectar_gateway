@@ -14,6 +14,10 @@ const Duration kAccessTokenSkew = Duration(seconds: 60);
 /// Foreground auto-refresh period while the app is open.
 const Duration kForegroundPoll = Duration(seconds: 20);
 
+/// Check period of the optional Android foreground service ("fast monitoring").
+const Duration kFastInterval = Duration(seconds: 60);
+const int kFastServiceId = 4711;
+
 /// Notification ids. A "recovered" notification reuses the id of its "down"
 /// notification, so it replaces it instead of stacking.
 const int kServerAlertId = 1;

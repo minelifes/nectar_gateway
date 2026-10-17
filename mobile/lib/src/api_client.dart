@@ -114,16 +114,72 @@ class ApiClient {
     );
   }
 
+  // ---- domain management ----
+
+  Future<Map<String, dynamic>> createRoute(Map<String, dynamic> route) async =>
+      (await _sendJson('POST', '/api/routes', route) as Map).cast<String, dynamic>();
+
+  Future<Map<String, dynamic>> updateRoute(int id, Map<String, dynamic> route) async =>
+      (await _sendJson('PUT', '/api/routes/$id', route) as Map).cast<String, dynamic>();
+
+  Future<void> deleteRoute(int id) async {
+    await _authed('DELETE', '/api/routes/$id');
+  }
+
+  /// Requests a Let's Encrypt certificate (can take a while).
+  Future<Map<String, dynamic>> issueCert(int id) async =>
+      (await _sendJson('POST', '/api/routes/$id/cert', null, timeout: const Duration(seconds: 150)) as Map)
+          .cast<String, dynamic>();
+
+  Future<ImportResult> importNginx(String config, {required bool dryRun}) async {
+    final j = await _sendJson('POST', '/api/import/nginx', {'config': config, 'dry_run': dryRun});
+    return ImportResult.fromApi((j as Map).cast<String, dynamic>());
+  }
+
   // ---- internals ----
 
-  Future<dynamic> _getJson(String path) async {
+  Future<dynamic> _sendJson(String method, String path, Object? body, {Duration? timeout}) async {
     await _ensureFresh();
-    var res = await _raw('GET', await _uri(path), headers: await _authHeader());
+    Future<http.Response> go() async =>
+        _raw(method, await _uri(path), headers: await _authHeader(), body: body, timeout: timeout);
+    var res = await go();
     if (res.statusCode == 401) {
       await _refresh();
-      res = await _raw('GET', await _uri(path), headers: await _authHeader());
+      res = await go();
     }
     if (res.statusCode >= 400) throw ApiException(res.statusCode, _errorMessage(res));
+    if (res.bodyBytes.isEmpty) return null;
+    try {
+      return jsonDecode(utf8.decode(res.bodyBytes));
+    } on FormatException {
+      throw ApiException(res.statusCode, 'Server returned invalid JSON');
+    }
+  }
+
+  /// Currently blocked IPs (scanners auto-blocked for 24 h by the gateway).
+  Future<List<BlockedIp>> fetchBlocked() async {
+    final j = await _getJson('/api/blocked');
+    return [for (final e in (j as List<dynamic>)) BlockedIp.fromJson((e as Map).cast<String, dynamic>())];
+  }
+
+  Future<void> unblock(String ip) async {
+    await _authed('DELETE', '/api/blocked/${Uri.encodeComponent(ip)}');
+  }
+
+  /// Authenticated request with proactive refresh and one retry after a 401.
+  Future<http.Response> _authed(String method, String path) async {
+    await _ensureFresh();
+    var res = await _raw(method, await _uri(path), headers: await _authHeader());
+    if (res.statusCode == 401) {
+      await _refresh();
+      res = await _raw(method, await _uri(path), headers: await _authHeader());
+    }
+    if (res.statusCode >= 400) throw ApiException(res.statusCode, _errorMessage(res));
+    return res;
+  }
+
+  Future<dynamic> _getJson(String path) async {
+    final res = await _authed('GET', path);
     try {
       return jsonDecode(utf8.decode(res.bodyBytes));
     } on FormatException {
@@ -182,7 +238,9 @@ class ApiClient {
     Uri uri, {
     Map<String, String>? headers,
     Object? body,
+    Duration? timeout,
   }) async {
+    final t = timeout ?? kRequestTimeout;
     final req = http.Request(method, uri)..headers['Accept'] = 'application/json';
     if (body != null) {
       req.headers['Content-Type'] = 'application/json';
@@ -190,8 +248,8 @@ class ApiClient {
     }
     if (headers != null) req.headers.addAll(headers);
     try {
-      final streamed = await _http.send(req).timeout(kRequestTimeout);
-      return await http.Response.fromStream(streamed).timeout(kRequestTimeout);
+      final streamed = await _http.send(req).timeout(t);
+      return await http.Response.fromStream(streamed).timeout(t);
     } on TimeoutException {
       throw ServerUnreachableException('Timed out');
     } on SocketException catch (e) {

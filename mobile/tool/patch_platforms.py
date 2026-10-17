@@ -42,10 +42,35 @@ def patch_manifest(root: Path):
     s = p.read_text()
     orig = s
 
-    for perm in ("android.permission.INTERNET", "android.permission.POST_NOTIFICATIONS"):
+    for perm in (
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS",
+        # fast monitoring (foreground service, every 60 s)
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+    ):
         if perm not in s:
             s = s.replace("<application", f'<uses-permission android:name="{perm}"/>\n    <application', 1)
             log(f"manifest: added {perm}")
+
+    if "flutter_foreground_task.service.ForegroundService" not in s:
+        # "specialUse" has no 6h/24h timeout (dataSync does on Android 15+) and may
+        # be restarted from BOOT_COMPLETED.
+        service = (
+            '<service\n'
+            '            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"\n'
+            '            android:foregroundServiceType="specialUse"\n'
+            '            android:exported="false">\n'
+            '            <property\n'
+            '                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n'
+            '                android:value="Periodic uptime monitoring of the user\'s own servers" />\n'
+            '        </service>\n'
+            '    </application>'
+        )
+        s = s.replace("</application>", service, 1)
+        log("manifest: declared foreground service (specialUse)")
 
     if "usesCleartextTraffic" not in s:
         # lets you use a plain http://host:8081 admin URL (e.g. on a LAN)

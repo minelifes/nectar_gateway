@@ -32,6 +32,8 @@ class Storage {
   static const _kRefresh = 'refresh_token';
   static const _kSnapshot = 'snapshot';
   static const _kMonitor = 'monitor_state';
+  static const _kBlocked = 'blocked_ips';
+  static const _kFast = 'fast_mode';
 
   // ---- server ----
 
@@ -42,6 +44,12 @@ class Storage {
     await _prefs.setString(_kUrl, url);
     await _prefs.setString(_kUser, username);
   }
+
+  // ---- settings ----
+
+  /// "Fast monitoring": 60 s checks via an Android foreground service.
+  Future<bool> fastMode() async => (await _prefs.getBool(_kFast)) ?? false;
+  Future<void> setFastMode(bool on) => _prefs.setBool(_kFast, on);
 
   // ---- tokens ----
 
@@ -82,6 +90,7 @@ class Storage {
     await clearTokens();
     await _prefs.remove(_kSnapshot);
     await _prefs.remove(_kMonitor);
+    await _prefs.remove(_kBlocked);
   }
 
   // ---- cached last-known data ----
@@ -95,6 +104,23 @@ class Storage {
       return Snapshot.fromJson((jsonDecode(raw) as Map).cast<String, dynamic>());
     } catch (_) {
       return null; // corrupt/old cache format - just refetch
+    }
+  }
+
+  // ---- cached blocked IP list ----
+
+  Future<void> saveBlocked(List<BlockedIp> list) =>
+      _prefs.setString(_kBlocked, jsonEncode([for (final b in list) b.toJson()]));
+
+  Future<List<BlockedIp>?> loadBlocked() async {
+    final raw = await _prefs.getString(_kBlocked);
+    if (raw == null) return null;
+    try {
+      return [
+        for (final e in (jsonDecode(raw) as List)) BlockedIp.fromJson((e as Map).cast<String, dynamic>()),
+      ];
+    } catch (_) {
+      return null;
     }
   }
 
