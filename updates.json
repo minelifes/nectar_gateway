@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "components": {
+    "gateway": {
+      "stable": [
+        {
+          "component": "gateway",
+          "version": "1.2.0",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:dd7d3413a818671be152e15a0d0d98df4960d88810a043a78c97eca9c136de4d",
+          "kind": "minor",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": false,
+          "notes": "",
+          "previous": "1.1.0",
+          "published_at": "2026-10-18T02:13:44+00:00"
+        }
+      ],
+      "beta": [
+        {
+          "component": "gateway",
+          "version": "1.2.0",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:dd7d3413a818671be152e15a0d0d98df4960d88810a043a78c97eca9c136de4d",
+          "kind": "minor",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": false,
+          "notes": "",
+          "previous": "1.1.0",
+          "published_at": "2026-10-18T02:13:44+00:00"
+        }
+      ]
+    }
+  },
+  "updated_at": "2026-10-18T02:13:44+00:00"
+}
