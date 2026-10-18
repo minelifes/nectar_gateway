@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 
-SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
+SEMVER = re.compile(r"^(?:[A-Za-z0-9_.-]+-)?v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
 
 
 def git(*args):
@@ -38,7 +38,7 @@ def parse(v):
 
 
 def previous_tag(version):
-    tags = [t for t in git("tag", "--list", "v*").split() if SEMVER.match(t)]
+    tags = [t for t in git("tag", "--list").split() if SEMVER.match(t)]
     cur = parse(version)
     older = sorted((parse(t)[:3], t) for t in tags if parse(t)[:3] < cur[:3] and not parse(t)[3])
     return older[-1][1] if older else None

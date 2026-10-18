@@ -3,6 +3,12 @@
 NGINX-like reverse proxy in Go with a React + Material UI admin panel.
 Add a domain → requests to that domain are proxied (all headers preserved) to the IP:port you set. Unknown domain → **410 Gone**.
 
+## Release
+```bash
+git commit --allow-empty -m "chore: release 1.2.0" -m "Release-As: 1.2.0"
+git push       
+```
+
 ## Build & run
 
 ```bash
