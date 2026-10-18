@@ -1,0 +1,7 @@
+mobile/
+ui/node_modules/
+*.db
+nectar_gateway
+.git
+.idea
+branding/

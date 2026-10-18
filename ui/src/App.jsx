@@ -39,7 +39,7 @@ const parentOf = (d) => {
 }
 
 const empty = {
-  domain: '', mode: 'proxy', target_ip: '', target_port: 80, target_https: false,
+  domain: '', path_prefix: '/', mode: 'proxy', target_ip: '', target_port: 80, target_https: false,
   rate_limit: 0, static_dir: '', cert_file: '', key_file: '', force_ssl: false,
   hc_enabled: false, hc_path: '/', hc_interval: 30, hc_type: 'status', hc_expect: ''
 }
@@ -318,7 +318,16 @@ export default function App() {
                   <TableCell sx={{ pl: 6 }}>
                     {r.mode === 'proxy' && <HealthDot status={healthMap[String(r.id)]} enabled={r.hc_enabled} />}
                     {r.domain}
-                    {r.cert_file && r.key_file && (
+                    {r.path_prefix && r.path_prefix !== '/' && (
+                      <Box component="span" sx={{ color: 'text.secondary', fontFamily: 'monospace' }}>{r.path_prefix}</Box>
+                    )}
+                    {r.managed_by && (
+                      <Tooltip title={`Managed by ${r.managed_by} — change it there`}>
+                        <Chip size="small" variant="outlined" label={r.managed_by} sx={{ ml: 0.75, height: 20 }} />
+                      </Tooltip>
+                    )}
+                    {r.maintenance && <Chip size="small" color="warning" label="maintenance" sx={{ ml: 0.75, height: 20 }} />}
+                    {((r.cert_file && r.key_file) || r.cert_not_after > 0) && (
                       <Tooltip title={r.force_ssl ? 'HTTPS (forced)' : 'HTTPS enabled'}>
                         <LockIcon sx={{ fontSize: 14, ml: 0.75, verticalAlign: 'middle', color: 'success.main' }} />
                       </Tooltip>
@@ -339,7 +348,7 @@ export default function App() {
                     )}
                   </TableCell>
                   <TableCell align="right">
-                    {!(r.cert_file && r.key_file) && (
+                    {!r.managed_by && !(r.cert_file && r.key_file) && !(r.cert_not_after > 0) && (
                       <Tooltip title="Get Let's Encrypt certificate">
                         <span>
                           <IconButton color="success" disabled={certBusy !== null}
@@ -351,6 +360,7 @@ export default function App() {
                         </span>
                       </Tooltip>
                     )}
+                    {!r.managed_by && (<>
                     <Tooltip title="Edit">
                       <IconButton onClick={() => setDialog({ mode: 'edit', route: { ...r } })}>
                         <EditIcon fontSize="small" />
@@ -361,6 +371,7 @@ export default function App() {
                         <DeleteIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
+                    </>)}
                   </TableCell>
                 </TableRow>
                 )))
@@ -395,9 +406,12 @@ export default function App() {
                   endAdornment: <InputAdornment position="end">.{dialog.suffix}</InputAdornment>
                 }} />
             ) : (
-              <TextField label="Domain" placeholder="example.com" fullWidth autoFocus
+              <TextField label="Domain" placeholder="example.com or *.example.com" fullWidth autoFocus
                 value={dialog?.route.domain ?? ''} onChange={set('domain')} />
             )}
+            <TextField label="Path prefix" placeholder="/" fullWidth
+              helperText="Route only this path (e.g. /api) — the longest matching prefix wins"
+              value={dialog?.route.path_prefix ?? '/'} onChange={set('path_prefix')} />
             <ToggleButtonGroup exclusive fullWidth color="primary" size="small"
               value={dialog?.route.mode ?? 'proxy'}
               onChange={(_, mode) => mode && setDialog((d) => ({ ...d, route: { ...d.route, mode } }))}>

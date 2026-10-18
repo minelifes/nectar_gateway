@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -16,33 +20,68 @@ import (
 
 	"nectar_gateway/internal/certbot"
 	"nectar_gateway/internal/health"
+	"nectar_gateway/internal/metrics"
 	"nectar_gateway/internal/nginx"
+	"nectar_gateway/internal/settings"
 	"nectar_gateway/internal/store"
 )
 
 const sessionCookie = "nectar_session"
 const sessionTTL = 24 * time.Hour
 
+// APIVersion is the major version of the admin API (bumped only on breaking changes).
+const APIVersion = 1
+
+// ManagedBy values that controllers use; routes with a non-empty managed_by are read-only for humans.
+const managedReadOnly = "this route is managed by %s — change it there"
+
 type Server struct {
 	store    *store.Store
 	user     string
 	pass     string
-	ui       fs.FS
+	ui       fs.FS // nil = headless (API only)
 	certbot  certbot.Config
 	health   *health.Checker
+	apiToken string // service token for controllers such as nectar-apps ("" = disabled)
+	version  string
+	issuer   CertIssuer // built-in ACME (nil = certbot only)
+	metrics  *metrics.Recorder
+	settings *settings.Settings // runtime settings (fallback upstream, …)
 	mu       sync.Mutex
 	sessions map[string]time.Time // web cookie session token -> expiry
 	access   map[string]time.Time // mobile access token -> expiry
 	limiter  *loginLimiter
 }
 
-func New(s *store.Store, user, pass string, ui fs.FS, cb certbot.Config, hc *health.Checker) *Server {
-	return &Server{
+// CertIssuer obtains certificates (implemented by the built-in ACME client).
+type CertIssuer interface {
+	Issue(ctx context.Context, domain string) (certPEM, keyPEM string, err error)
+}
+
+// Options are optional settings for New.
+type Options struct {
+	APIToken string     // GATEWAY_API_TOKEN
+	Version  string     // build version
+	Issuer   CertIssuer // built-in ACME client
+	Metrics  *metrics.Recorder
+	Settings *settings.Settings
+}
+
+func New(s *store.Store, user, pass string, ui fs.FS, cb certbot.Config, hc *health.Checker, opt ...Options) *Server {
+	srv := &Server{
 		store: s, user: user, pass: pass, ui: ui, certbot: cb, health: hc,
 		sessions: map[string]time.Time{},
 		access:   map[string]time.Time{},
 		limiter:  newLoginLimiter(),
+		version:  "dev",
 	}
+	if len(opt) > 0 {
+		srv.apiToken, srv.issuer, srv.metrics, srv.settings = opt[0].APIToken, opt[0].Issuer, opt[0].Metrics, opt[0].Settings
+		if opt[0].Version != "" {
+			srv.version = opt[0].Version
+		}
+	}
+	return srv
 }
 
 func (s *Server) Handler() http.Handler {
@@ -66,15 +105,52 @@ func (s *Server) Handler() http.Handler {
 	}))
 	mux.HandleFunc("GET /api/blocked", s.requireAuth(s.listBlocked))
 	mux.HandleFunc("DELETE /api/blocked/{ip}", s.requireAuth(s.unblockIP))
-	mux.Handle("/", s.uiHandler())
+	mux.HandleFunc("PUT /api/routes/{id}/cert", s.requireAuth(s.uploadCert))
+	mux.HandleFunc("DELETE /api/routes/{id}/cert", s.requireAuth(s.deleteCert))
+	mux.HandleFunc("GET /api/metrics", s.requireAuth(s.getMetrics))
+	mux.HandleFunc("GET /api/access-log", s.requireAuth(s.getAccessLog))
+	mux.HandleFunc("GET /api/settings", s.requireAuth(s.getSettings))
+	mux.HandleFunc("PUT /api/settings", s.requireAuth(s.putSettings))
+
+	// unauthenticated: probes and version discovery
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.store.Ping(); err != nil {
+			http.Error(w, "database: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"version": s.version, "api_version": APIVersion, "headless": s.ui == nil})
+	})
+
+	if s.ui != nil {
+		mux.Handle("/", s.uiHandler())
+	} else {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "headless mode: the admin UI is disabled (ADMIN_UI=false)"})
+		})
+	}
 	return mux
 }
 
 // ---- auth ----
 
+// isService reports whether the request carries the controller service token.
+func (s *Server) isService(r *http.Request) bool {
+	tok, ok := bearerToken(r)
+	return ok && s.apiToken != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.apiToken)) == 1
+}
+
 func (s *Server) authed(r *http.Request) bool {
-	if s.user == "" { // auth disabled
+	if s.isService(r) {
 		return true
+	}
+	if s.user == "" {
+		// no admin user: open only when no service token is configured either (legacy local setups);
+		// with a token (headless/in-cluster) the token is the only way in
+		return s.apiToken == ""
 	}
 	if tok, ok := bearerToken(r); ok { // mobile app
 		return s.validAccess(tok)
@@ -120,7 +196,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(creds.Username), []byte(s.user)) != 1 ||
+	if s.user == "" || subtle.ConstantTimeCompare([]byte(creds.Username), []byte(s.user)) != 1 ||
 		subtle.ConstantTimeCompare([]byte(creds.Password), []byte(s.pass)) != 1 {
 		s.limiter.fail(ip)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
@@ -195,7 +271,13 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 // ---- routes CRUD ----
 
 func (s *Server) listRoutes(w http.ResponseWriter, r *http.Request) {
-	routes, err := s.store.List()
+	var f store.Filter
+	if q := r.URL.Query(); q.Has("managed_by") {
+		m := q.Get("managed_by")
+		f.ManagedBy = &m
+	}
+	f.Owner = r.URL.Query().Get("owner")
+	routes, err := s.store.List(f)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -209,11 +291,40 @@ func (s *Server) createRoute(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.store.Create(&rt); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+	if rt.ManagedBy != "" && !s.isService(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "managed routes can only be created with the service token"})
 		return
 	}
+	if err := s.store.Create(&rt); err != nil {
+		writeErr(w, routeErrStatus(err), err)
+		return
+	}
+	s.autoIssue(rt)
 	writeJSON(w, http.StatusCreated, rt)
+}
+
+func routeErrStatus(err error) int {
+	if errors.Is(err, store.ErrConflict) {
+		return http.StatusConflict
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return http.StatusNotFound
+	}
+	return http.StatusBadRequest
+}
+
+// guardManaged rejects changes to managed routes unless the caller is that controller.
+func (s *Server) guardManaged(w http.ResponseWriter, r *http.Request, id int64) (store.Route, bool) {
+	rt, ok := s.store.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "route not found"})
+		return rt, false
+	}
+	if rt.ManagedBy != "" && !s.isService(r) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": fmt.Sprintf(managedReadOnly, rt.ManagedBy)})
+		return rt, false
+	}
+	return rt, true
 }
 
 func (s *Server) updateRoute(w http.ResponseWriter, r *http.Request) {
@@ -222,16 +333,24 @@ func (s *Server) updateRoute(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, ok := s.guardManaged(w, r, id); !ok {
+		return
+	}
 	var rt store.Route
 	if err := json.NewDecoder(r.Body).Decode(&rt); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	rt.ID = id
-	if err := s.store.Update(&rt); err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+	if rt.ManagedBy != "" && !s.isService(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only the service token can mark routes as managed"})
 		return
 	}
+	if err := s.store.Update(&rt); err != nil {
+		writeErr(w, routeErrStatus(err), err)
+		return
+	}
+	s.autoIssue(rt)
 	writeJSON(w, http.StatusOK, rt)
 }
 
@@ -276,9 +395,25 @@ func (s *Server) issueCert(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	rt, ok := s.store.Get(id)
+	rt, ok := s.guardManaged(w, r, id)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "route not found"})
+		return
+	}
+	if s.issuer != nil {
+		log.Printf("acme: obtaining certificate for %s", rt.Domain)
+		certPEM, keyPEM, err := s.issuer.Issue(r.Context(), rt.Domain)
+		if err != nil {
+			log.Printf("acme: %s: %v", rt.Domain, err)
+			writeErr(w, http.StatusBadGateway, err)
+			return
+		}
+		updated, err := s.store.SetCert(id, certPEM, keyPEM, "acme")
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
+		}
+		log.Printf("acme: issued certificate for %s", rt.Domain)
+		writeJSON(w, http.StatusOK, updated)
 		return
 	}
 	log.Printf("certbot: obtaining certificate for %s", rt.Domain)
@@ -318,9 +453,136 @@ func (s *Server) deleteRoute(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, ok := s.guardManaged(w, r, id); !ok {
+		return
+	}
 	if err := s.store.Delete(id); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// uploadCert stores a PEM certificate + key for the route's host (G11).
+func (s *Server) uploadCert(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.guardManaged(w, r, id); !ok {
+		return
+	}
+	var in struct {
+		CertPEM string `json:"cert_pem"`
+		KeyPEM  string `json:"key_pem"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	rt, err := s.store.SetCert(id, in.CertPEM, in.KeyPEM, "upload")
+	if err != nil {
+		writeErr(w, routeErrStatus(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rt)
+}
+
+func (s *Server) deleteCert(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.guardManaged(w, r, id); !ok {
+		return
+	}
+	if err := s.store.ClearCert(id); err != nil {
+		writeErr(w, routeErrStatus(err), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// autoIssue starts a background certificate request for routes with acme=true and no valid cert.
+func (s *Server) autoIssue(rt store.Route) {
+	if s.issuer == nil || !rt.ACME || strings.HasPrefix(rt.Domain, "*.") {
+		return
+	}
+	if existing, ok := s.store.CertRoute(rt.Domain); ok && existing.CertNotAfter > time.Now().Add(30*24*time.Hour).Unix() {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		certPEM, keyPEM, err := s.issuer.Issue(ctx, rt.Domain)
+		if err != nil {
+			log.Printf("acme: %s: %v", rt.Domain, err)
+			return
+		}
+		if _, err := s.store.SetCert(rt.ID, certPEM, keyPEM, "acme"); err != nil {
+			log.Printf("acme: store %s: %v", rt.Domain, err)
+			return
+		}
+		log.Printf("acme: issued certificate for %s", rt.Domain)
+	}()
+}
+
+// ---- metrics / access log (G14) ----
+
+func (s *Server) getMetrics(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	minutes, _ := strconv.Atoi(q.Get("minutes"))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": s.metrics != nil,
+		"domains": orEmpty(s.metrics.Summaries(minutes, q.Get("domain"), q.Get("series") == "1")),
+	})
+}
+
+func orEmpty[T any](v []T) []T {
+	if v == nil {
+		return []T{}
+	}
+	return v
+}
+
+func (s *Server) getAccessLog(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit > 1000 {
+		limit = 1000
+	}
+	status := 0
+	switch v := strings.ToLower(q.Get("status")); {
+	case len(v) == 3 && strings.HasSuffix(v, "xx"):
+		status = int(v[0] - '0')
+	case v != "":
+		status, _ = strconv.Atoi(v)
+	}
+	writeJSON(w, http.StatusOK, orEmpty(s.metrics.Log(metrics.LogQuery{Domain: q.Get("domain"), Status: status, IP: q.Get("ip"), Limit: limit})))
+}
+
+// ---- runtime settings (G10 fallback) ----
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.settings.Get())
+}
+
+func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
+	if s.settings == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "settings are not available"})
+		return
+	}
+	v := s.settings.Get()
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&v); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.settings.Set(v); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	log.Printf("settings: fallback_http=%q fallback_tls=%q", v.FallbackHTTP, v.FallbackTLS)
+	writeJSON(w, http.StatusOK, s.settings.Get())
 }

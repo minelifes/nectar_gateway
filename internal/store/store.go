@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -11,32 +12,18 @@ import (
 )
 
 const (
-	ModeProxy  = "proxy"
-	ModeStatic = "static"
+	ModeProxy    = "proxy"
+	ModeStatic   = "static"
+	ModeRedirect = "redirect" // answer with a redirect to RedirectURL (www ↔ apex, moved sites)
 )
 
-type Route struct {
-	ID         int64  `json:"id"`
-	Domain     string `json:"domain"`
-	Mode       string `json:"mode"` // "proxy" | "static"
-	TargetIP    string `json:"target_ip"`
-	TargetPort  int    `json:"target_port"`
-	TargetHTTPS bool   `json:"target_https"` // connect to the backend over HTTPS
-	StaticDir  string `json:"static_dir"`
-	RateLimit  int    `json:"rate_limit"` // max requests/sec per IP (0 = unlimited)
-	HCEnabled  bool   `json:"hc_enabled"`  // health check enabled
-	HCPath     string `json:"hc_path"`     // path to probe, e.g. /health
-	HCInterval int    `json:"hc_interval"` // seconds between checks
-	HCType     string `json:"hc_type"`     // "status" | "contains" | "json"
-	HCExpect   string `json:"hc_expect"`   // expectation, meaning depends on hc_type
-	CertFile   string `json:"cert_file"` // path to fullchain PEM; enables HTTPS for the domain
-	KeyFile    string `json:"key_file"`  // path to private key PEM
-	ForceSSL   bool   `json:"force_ssl"` // redirect HTTP -> HTTPS
-}
+// Backend protocols.
+const (
+	ProtoHTTP1 = "http1" // HTTP/1.1 to the backend (default; WebSocket works)
+	ProtoH2C   = "h2c"   // cleartext HTTP/2 to the backend (gRPC)
+)
 
-// HasSSL reports whether the route has a certificate configured.
-func (r Route) HasSSL() bool { return r.CertFile != "" && r.KeyFile != "" }
-
+// BlockedIP is a temporarily blocked client address.
 type BlockedIP struct {
 	IP        string    `json:"ip"`
 	Reason    string    `json:"reason"`
@@ -44,67 +31,27 @@ type BlockedIP struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// Store is the gateway database plus in-memory caches used on the hot path.
 type Store struct {
 	db      *sql.DB
 	mu      sync.RWMutex
-	cache   map[string]Route     // domain -> route
+	table   routeTable           // host → routes (longest path prefix first)
 	blocked map[string]BlockedIP // ip -> block
 }
+
+// schemaVersion is stored in PRAGMA user_version.
+const schemaVersion = 3
 
 func New(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS routes (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		domain TEXT NOT NULL UNIQUE,
-		mode TEXT NOT NULL DEFAULT 'proxy',
-		target_ip TEXT NOT NULL DEFAULT '',
-		target_port INTEGER NOT NULL DEFAULT 80,
-		target_https INTEGER NOT NULL DEFAULT 0,
-		rate_limit INTEGER NOT NULL DEFAULT 0,
-		hc_enabled INTEGER NOT NULL DEFAULT 0,
-		hc_path TEXT NOT NULL DEFAULT '/',
-		hc_interval INTEGER NOT NULL DEFAULT 30,
-		hc_type TEXT NOT NULL DEFAULT 'status',
-		hc_expect TEXT NOT NULL DEFAULT '',
-		static_dir TEXT NOT NULL DEFAULT '',
-		cert_file TEXT NOT NULL DEFAULT '',
-		key_file TEXT NOT NULL DEFAULT '',
-		force_ssl INTEGER NOT NULL DEFAULT 0
-	)`); err != nil {
-		return nil, err
+	db.SetMaxOpenConns(1) // SQLite: one writer; avoids SQLITE_BUSY between our goroutines
+	if err := migrate(db); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	// migrations for older DBs (errors ignored if columns exist)
-	db.Exec(`ALTER TABLE routes ADD COLUMN mode TEXT NOT NULL DEFAULT 'proxy'`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN static_dir TEXT NOT NULL DEFAULT ''`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN cert_file TEXT NOT NULL DEFAULT ''`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN key_file TEXT NOT NULL DEFAULT ''`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN force_ssl INTEGER NOT NULL DEFAULT 0`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN target_https INTEGER NOT NULL DEFAULT 0`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN rate_limit INTEGER NOT NULL DEFAULT 0`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN hc_enabled INTEGER NOT NULL DEFAULT 0`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN hc_path TEXT NOT NULL DEFAULT '/'`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN hc_interval INTEGER NOT NULL DEFAULT 30`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN hc_type TEXT NOT NULL DEFAULT 'status'`)
-	db.Exec(`ALTER TABLE routes ADD COLUMN hc_expect TEXT NOT NULL DEFAULT ''`)
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS refresh_tokens (
-		hash TEXT PRIMARY KEY,
-		created_at INTEGER NOT NULL,
-		expires_at INTEGER NOT NULL
-	)`); err != nil {
-		return nil, err
-	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS blocked_ips (
-		ip TEXT PRIMARY KEY,
-		reason TEXT NOT NULL DEFAULT '',
-		blocked_at INTEGER NOT NULL,
-		expires_at INTEGER NOT NULL
-	)`); err != nil {
-		return nil, err
-	}
-	s := &Store{db: db, cache: map[string]Route{}, blocked: map[string]BlockedIP{}}
+	s := &Store{db: db, blocked: map[string]BlockedIP{}}
 	if err := s.reload(); err != nil {
 		return nil, err
 	}
@@ -112,6 +59,143 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// Ping checks the database (readiness).
+func (s *Store) Ping() error { return s.db.Ping() }
+
+const routesTable = `CREATE TABLE routes (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	domain TEXT NOT NULL,
+	path_prefix TEXT NOT NULL DEFAULT '/',
+	mode TEXT NOT NULL DEFAULT 'proxy',
+	target_ip TEXT NOT NULL DEFAULT '',
+	target_port INTEGER NOT NULL DEFAULT 80,
+	target_https INTEGER NOT NULL DEFAULT 0,
+	rate_limit INTEGER NOT NULL DEFAULT 0,
+	hc_enabled INTEGER NOT NULL DEFAULT 0,
+	hc_path TEXT NOT NULL DEFAULT '/',
+	hc_interval INTEGER NOT NULL DEFAULT 30,
+	hc_type TEXT NOT NULL DEFAULT 'status',
+	hc_expect TEXT NOT NULL DEFAULT '',
+	static_dir TEXT NOT NULL DEFAULT '',
+	cert_file TEXT NOT NULL DEFAULT '',
+	key_file TEXT NOT NULL DEFAULT '',
+	force_ssl INTEGER NOT NULL DEFAULT 0,
+	managed_by TEXT NOT NULL DEFAULT '',
+	owner TEXT NOT NULL DEFAULT '',
+	cert_pem TEXT NOT NULL DEFAULT '',
+	key_pem TEXT NOT NULL DEFAULT '',
+	cert_source TEXT NOT NULL DEFAULT '',
+	cert_not_after INTEGER NOT NULL DEFAULT 0,
+	acme INTEGER NOT NULL DEFAULT 0,
+	maintenance INTEGER NOT NULL DEFAULT 0,
+	backend_protocol TEXT NOT NULL DEFAULT 'http1',
+	timeout_seconds INTEGER NOT NULL DEFAULT 0,
+	max_body_mb INTEGER NOT NULL DEFAULT 0,
+	redirect_url TEXT NOT NULL DEFAULT '',
+	redirect_code INTEGER NOT NULL DEFAULT 0,
+	basic_auth TEXT NOT NULL DEFAULT '',
+	updated_at INTEGER NOT NULL DEFAULT 0,
+	UNIQUE (domain, path_prefix)
+)`
+
+// migrate brings any older database (v0: no version, unique domain) to the current schema.
+func migrate(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	var hasRoutes int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='routes'`).Scan(&hasRoutes); err != nil {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	switch {
+	case hasRoutes == 0:
+		if _, err := tx.Exec(routesTable); err != nil {
+			return err
+		}
+	case version < 2:
+		// v0/v1 had UNIQUE(domain) and fewer columns: rebuild the table, keeping every route.
+		// Older databases may lack some columns (they were added one by one), so add them first.
+		for _, col := range []string{
+			`mode TEXT NOT NULL DEFAULT 'proxy'`, `static_dir TEXT NOT NULL DEFAULT ''`,
+			`cert_file TEXT NOT NULL DEFAULT ''`, `key_file TEXT NOT NULL DEFAULT ''`,
+			`force_ssl INTEGER NOT NULL DEFAULT 0`, `target_https INTEGER NOT NULL DEFAULT 0`,
+			`rate_limit INTEGER NOT NULL DEFAULT 0`, `hc_enabled INTEGER NOT NULL DEFAULT 0`,
+			`hc_path TEXT NOT NULL DEFAULT '/'`, `hc_interval INTEGER NOT NULL DEFAULT 30`,
+			`hc_type TEXT NOT NULL DEFAULT 'status'`, `hc_expect TEXT NOT NULL DEFAULT ''`,
+		} {
+			tx.Exec(`ALTER TABLE routes ADD COLUMN ` + col) // error = column exists
+		}
+		if _, err := tx.Exec(strings.Replace(routesTable, "CREATE TABLE routes", "CREATE TABLE routes_v2", 1)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO routes_v2 (id, domain, mode, target_ip, target_port, target_https, rate_limit,
+			hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl)
+			SELECT id, domain, mode, target_ip, target_port, target_https, rate_limit,
+			hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl FROM routes`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DROP TABLE routes`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`ALTER TABLE routes_v2 RENAME TO routes`); err != nil {
+			return err
+		}
+	}
+	if hasRoutes > 0 && version == 2 {
+		// v3: per-route protocol, timeouts, body limit, redirects, basic auth
+		for _, col := range []string{
+			`backend_protocol TEXT NOT NULL DEFAULT 'http1'`, `timeout_seconds INTEGER NOT NULL DEFAULT 0`,
+			`max_body_mb INTEGER NOT NULL DEFAULT 0`, `redirect_url TEXT NOT NULL DEFAULT ''`,
+			`redirect_code INTEGER NOT NULL DEFAULT 0`, `basic_auth TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, err := tx.Exec(`ALTER TABLE routes ADD COLUMN ` + col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+				return err
+			}
+		}
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS refresh_tokens (
+			hash TEXT PRIMARY KEY,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS blocked_ips (
+			ip TEXT PRIMARY KEY,
+			reason TEXT NOT NULL DEFAULT '',
+			blocked_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value BLOB NOT NULL)`, // e.g. the ACME account key
+		fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion),
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// GetKV / SetKV store small blobs (ACME account key, …).
+func (s *Store) GetKV(key string) ([]byte, error) {
+	var v []byte
+	err := s.db.QueryRow(`SELECT value FROM kv WHERE key = ?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return v, err
+}
+
+func (s *Store) SetKV(key string, value []byte) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)`, key, value)
+	return err
 }
 
 // ---- mobile refresh tokens (only SHA-256 hashes are stored) ----
@@ -214,146 +298,4 @@ func (s *Store) ListBlocked() []BlockedIP {
 	}
 	s.mu.Unlock()
 	return out
-}
-
-func (s *Store) reload() error {
-	rows, err := s.db.Query(`SELECT id, domain, mode, target_ip, target_port, target_https, rate_limit, hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl FROM routes`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	cache := map[string]Route{}
-	for rows.Next() {
-		var r Route
-		if err := rows.Scan(&r.ID, &r.Domain, &r.Mode, &r.TargetIP, &r.TargetPort, &r.TargetHTTPS, &r.RateLimit, &r.HCEnabled, &r.HCPath, &r.HCInterval, &r.HCType, &r.HCExpect, &r.StaticDir, &r.CertFile, &r.KeyFile, &r.ForceSSL); err != nil {
-			return err
-		}
-		cache[r.Domain] = r
-	}
-	s.mu.Lock()
-	s.cache = cache
-	s.mu.Unlock()
-	return nil
-}
-
-// Lookup returns the route for a domain (case-insensitive), if any.
-func (s *Store) Lookup(domain string) (Route, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	r, ok := s.cache[strings.ToLower(domain)]
-	return r, ok
-}
-
-// Get returns the route with the given id.
-func (s *Store) Get(id int64) (Route, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, r := range s.cache {
-		if r.ID == id {
-			return r, true
-		}
-	}
-	return Route{}, false
-}
-
-func (s *Store) List() ([]Route, error) {
-	rows, err := s.db.Query(`SELECT id, domain, mode, target_ip, target_port, target_https, rate_limit, hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl FROM routes ORDER BY domain`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Route{}
-	for rows.Next() {
-		var r Route
-		if err := rows.Scan(&r.ID, &r.Domain, &r.Mode, &r.TargetIP, &r.TargetPort, &r.TargetHTTPS, &r.RateLimit, &r.HCEnabled, &r.HCPath, &r.HCInterval, &r.HCType, &r.HCExpect, &r.StaticDir, &r.CertFile, &r.KeyFile, &r.ForceSSL); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, nil
-}
-
-func normalize(r *Route) error {
-	r.Domain = strings.ToLower(strings.TrimSpace(r.Domain))
-	r.TargetIP = strings.TrimSpace(r.TargetIP)
-	r.StaticDir = strings.TrimSpace(r.StaticDir)
-	if r.Mode == "" {
-		r.Mode = ModeProxy
-	}
-	if r.Domain == "" {
-		return errors.New("domain is required")
-	}
-	switch r.Mode {
-	case ModeProxy:
-		if r.TargetIP == "" {
-			return errors.New("target_ip is required for proxy mode")
-		}
-		if r.TargetPort <= 0 || r.TargetPort > 65535 {
-			r.TargetPort = 80
-		}
-	case ModeStatic:
-		if r.StaticDir == "" {
-			return errors.New("static_dir is required for static mode")
-		}
-	default:
-		return errors.New("mode must be 'proxy' or 'static'")
-	}
-	if r.RateLimit < 0 {
-		r.RateLimit = 0
-	}
-	r.HCPath = strings.TrimSpace(r.HCPath)
-	if r.HCPath == "" {
-		r.HCPath = "/"
-	} else if !strings.HasPrefix(r.HCPath, "/") {
-		r.HCPath = "/" + r.HCPath
-	}
-	if r.HCInterval < 5 {
-		r.HCInterval = 30
-	}
-	switch r.HCType {
-	case "status", "contains", "json":
-	default:
-		r.HCType = "status"
-	}
-	r.CertFile = strings.TrimSpace(r.CertFile)
-	r.KeyFile = strings.TrimSpace(r.KeyFile)
-	if (r.CertFile == "") != (r.KeyFile == "") {
-		return errors.New("cert_file and key_file must be set together")
-	}
-	if r.ForceSSL && !r.HasSSL() {
-		return errors.New("force_ssl requires cert_file and key_file")
-	}
-	return nil
-}
-
-func (s *Store) Create(r *Route) error {
-	if err := normalize(r); err != nil {
-		return err
-	}
-	res, err := s.db.Exec(`INSERT INTO routes (domain, mode, target_ip, target_port, target_https, rate_limit, hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.Domain, r.Mode, r.TargetIP, r.TargetPort, r.TargetHTTPS, r.RateLimit, r.HCEnabled, r.HCPath, r.HCInterval, r.HCType, r.HCExpect, r.StaticDir, r.CertFile, r.KeyFile, r.ForceSSL)
-	if err != nil {
-		return err
-	}
-	r.ID, _ = res.LastInsertId()
-	return s.reload()
-}
-
-func (s *Store) Update(r *Route) error {
-	if err := normalize(r); err != nil {
-		return err
-	}
-	_, err := s.db.Exec(`UPDATE routes SET domain=?, mode=?, target_ip=?, target_port=?, target_https=?, rate_limit=?, hc_enabled=?, hc_path=?, hc_interval=?, hc_type=?, hc_expect=?, static_dir=?, cert_file=?, key_file=?, force_ssl=? WHERE id=?`,
-		r.Domain, r.Mode, r.TargetIP, r.TargetPort, r.TargetHTTPS, r.RateLimit, r.HCEnabled, r.HCPath, r.HCInterval, r.HCType, r.HCExpect, r.StaticDir, r.CertFile, r.KeyFile, r.ForceSSL, r.ID)
-	if err != nil {
-		return err
-	}
-	return s.reload()
-}
-
-func (s *Store) Delete(id int64) error {
-	if _, err := s.db.Exec(`DELETE FROM routes WHERE id=?`, id); err != nil {
-		return err
-	}
-	return s.reload()
 }

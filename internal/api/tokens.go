@@ -96,7 +96,7 @@ func (s *Server) tokenLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(creds.Username), []byte(s.user)) != 1 ||
+	if s.user == "" || subtle.ConstantTimeCompare([]byte(creds.Username), []byte(s.user)) != 1 ||
 		subtle.ConstantTimeCompare([]byte(creds.Password), []byte(s.pass)) != 1 {
 		s.limiter.fail(ip)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})

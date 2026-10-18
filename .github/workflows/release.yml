@@ -1,0 +1,127 @@
+# Releases: release-please keeps a release PR (changelog + version bump from conventional commits)
+# open on main. Merging it tags vX.Y.Z and this workflow publishes the release:
+#   multi-arch image → ghcr.io/minelifes/nectar-gateway:X.Y.Z (+ :X.Y, :stable or :beta), pinned by digest
+#   release.json attached to the GitHub release (read by the nectar-apps updater)
+#   updates.json on the gh-pages branch (the update feed, no GitHub API rate limits)
+# Beta releases: push a tag like v1.3.0-beta.1 by hand.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*-*"]          # manual pre-release tags (beta/rc); stable tags come from release-please
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish, e.g. v0.3.0"
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+
+env:
+  COMPONENT: gateway
+  IMAGE: ghcr.io/${{ github.repository_owner }}/nectar-gateway
+
+jobs:
+  release-please:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    needs: [release-please]
+    if: always() && (needs.release-please.outputs.created == 'true' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ needs.release-please.outputs.tag || inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          case "$TAG" in *-*) echo "channel=beta" >> "$GITHUB_OUTPUT" ;; *) echo "channel=stable" >> "$GITHUB_OUTPUT" ;; esac
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go mod download && go vet ./... && go test -race -count=1 ./...
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        run: |
+          V="${{ steps.tag.outputs.version }}"
+          TAGS="$IMAGE:$V,$IMAGE:${{ steps.tag.outputs.channel }}"
+          if [ "${{ steps.tag.outputs.channel }}" = stable ]; then TAGS="$TAGS,$IMAGE:${V%.*}"; fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.tag.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.version }}
+            org.opencontainers.image.licenses=LicenseRef-Nectar-Source-License-1.0
+
+      - name: release.json
+        run: |
+          python3 scripts/release_meta.py release-json --component "$COMPONENT" \
+            --version "${{ steps.tag.outputs.version }}" \
+            --image "$IMAGE@${{ steps.build.outputs.digest }}" \
+            --api-version-file internal/api/api.go \
+            --migrations-glob 'internal/store/store.go' > release.json
+          cat release.json
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            FLAGS=""; [ "${{ steps.tag.outputs.channel }}" = beta ] && FLAGS="--prerelease"
+            gh release create "$TAG" $FLAGS --title "$TAG" --notes "$(python3 -c 'import json;print(json.load(open("release.json"))["notes"])')"
+          fi
+          gh release upload "$TAG" release.json --clobber
+
+      - name: Update the feed (gh-pages/updates.json)
+        run: |
+          git config user.name "nectar-release-bot"
+          git config user.email "support@techbrain.llc"
+          cp release.json scripts/release_meta.py /tmp/
+          git fetch origin gh-pages:gh-pages 2>/dev/null || true
+          if git show-ref --quiet refs/heads/gh-pages; then git checkout gh-pages; else git checkout --orphan gh-pages && git rm -rf . >/dev/null; fi
+          python3 /tmp/release_meta.py update-feed --feed updates.json --release /tmp/release.json
+          git add updates.json
+          git commit -m "updates.json: $COMPONENT ${{ steps.tag.outputs.version }}"
+          git push origin gh-pages

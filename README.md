@@ -64,7 +64,37 @@ Push setup (ntfy, free): install the ntfy app ([Android](https://play.google.com
 
 ## API
 
-`GET/POST /api/routes`, `PUT/DELETE /api/routes/{id}` — JSON `{domain, target_ip, target_port}`.
+`GET/POST /api/routes`, `PUT/DELETE /api/routes/{id}` — JSON `{domain, path_prefix, target_ip, target_port, …}`.
+
+- **Path routing:** several routes can share a domain with different `path_prefix` values (`/`, `/api`, …); the longest matching prefix wins (matched per path segment, the path is passed through unchanged).
+- **Wildcard hosts:** `*.apps.example.com` serves any single-label subdomain; an exact route for a host always wins.
+- **Certificates:** `PUT /api/routes/{id}/cert` `{cert_pem, key_pem}` uploads a certificate (stored in the database, applied to every route of that host); `DELETE` removes it. `POST /api/routes/{id}/cert` issues one from Let's Encrypt. `acme: true` on a route issues and renews automatically.
+- **Managed routes:** routes with `managed_by` (e.g. `nectar-apps`) can only be changed with the service token; the UI shows them read-only. `GET /api/routes?managed_by=nectar-apps&owner=…` filters.
+- **Maintenance:** `maintenance: true` serves a branded "down for maintenance" page (503).
+- **Redirects:** `mode: "redirect"` + `redirect_url` (`https://example.com`) answers with a redirect (`redirect_code` 301 default, 302/307/308); path and query are kept unless the URL has its own path — e.g. `www.example.com → https://example.com`.
+- **Basic auth:** `basic_auth_users: [{user, password}]` protects a route (bcrypt; an empty password keeps that user's current one, `[]` removes basic auth). Controllers may send `basic_auth_htpasswd` (`user:<bcrypt>` lines) instead. Hashes are never returned — only `auth_usernames` and an `auth_fingerprint`.
+- **gRPC / HTTP/2:** `backend_protocol: "h2c"` talks cleartext HTTP/2 to the backend (gRPC). Clients get HTTP/2 over TLS automatically, and the plain HTTP port also accepts prior-knowledge HTTP/2. WebSockets work with the default `http1`.
+- **Limits:** `timeout_seconds` (time to response headers, default 60 s → 504) and `max_body_mb` (→ 413) per route.
+- **Metrics & access log:** `GET /api/metrics?minutes=60&domain=&series=1` — per-domain requests, RPS, status classes, bytes, p50/p95/p99 latency, per-minute series (in memory, last 60 minutes). `GET /api/access-log?domain=&status=5xx&ip=&limit=` — the last `ACCESS_LOG_SIZE` (2000) requests, newest first.
+- **Fallback & TLS passthrough (migrations):** `PUT /api/settings {fallback_http, fallback_tls}` (`host:port`). Requests for hosts without a route go to `fallback_http` instead of 410; HTTPS connections whose host has no certificate here are forwarded untouched (SNI passthrough) to `fallback_tls`, so a previous proxy keeps serving its own certificates. `FALLBACK_HTTP` / `FALLBACK_TLS` env vars are the defaults.
+- `GET /api/version` → `{version, api_version, headless}`, `GET /healthz`, `GET /readyz` (no auth). The proxy answers `/__nectar/canary` with `200 ok` for any host (update health checks).
+
+### Service token & headless mode
+
+| Var | | |
+|---|---|---|
+| `GATEWAY_API_TOKEN` | — | bearer token for controllers such as [nectar_apps](https://github.com/minelifes/nectar_apps) (min. 24 chars) |
+| `ADMIN_UI` | `true` | `false` = headless: no admin UI, API only; password login is off unless `ADMIN_USER`/`ADMIN_PASS` are set explicitly |
+| `ACME_EMAIL` | — | enables the built-in Let's Encrypt client (HTTP-01, certificates stored in the database, renewed 30 days before expiry) |
+| `ACME_DIRECTORY` | Let's Encrypt | e.g. `https://acme-staging-v02.api.letsencrypt.org/directory` for testing |
+| `FALLBACK_HTTP` / `FALLBACK_TLS` | — | default fallback upstream / SNI passthrough target (`host:port`); `PUT /api/settings` overrides |
+| `ACCESS_LOG_SIZE` | `2000` | access-log entries kept in memory |
+
+### Releases
+
+Merging the release PR that release-please keeps open on `main` tags `vX.Y.Z`; `.github/workflows/release.yml` then pushes the multi-arch image `ghcr.io/minelifes/nectar-gateway:X.Y.Z` (+ `:X.Y`, `:stable`), attaches `release.json` (read by the nectar-apps updater) and updates `updates.json` on `gh-pages`. Pre-releases: push a tag like `v0.3.0-beta.1`. Commit messages follow conventional commits (`fix:`, `feat:`, `feat!:` = breaking, `fix(security):`).
+
+Inside Kubernetes the gateway runs as a container (`Dockerfile`) with `hostNetwork` on ports 80/443; nectar_apps installs and drives it.
 
 ## Dev mode (UI hot reload)
 
