@@ -57,6 +57,15 @@ jobs:
           ref: ${{ steps.tag.outputs.tag }}
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build admin UI (embedded via ui/dist)
+        working-directory: ui
+        run: npm ci && npm run build
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

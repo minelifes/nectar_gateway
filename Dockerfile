@@ -1,11 +1,19 @@
 # nectar-gateway image (multi-arch: docker buildx build --platform linux/amd64,linux/arm64 .)
-# The admin UI build (ui/dist) is committed; rebuild it with `cd ui && npm ci && npm run build`.
+# The admin UI (ui/dist, git-ignored) is built in its own stage and embedded into the binary.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS ui
+WORKDIR /ui
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY ui/ ./
+RUN npm run build
+
 FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 ARG TARGETOS TARGETARCH VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+COPY --from=ui /ui/dist ./ui/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" -o /out/nectar_gateway .
 

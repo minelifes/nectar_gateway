@@ -5,3 +5,4 @@ nectar_gateway
 .git
 .idea
 branding/
+ui/dist/
