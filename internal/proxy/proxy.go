@@ -257,6 +257,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// acmeFileExists reports whether urlPath (under /.well-known/acme-challenge/)
+// is a regular file in the certbot webroot.
+func acmeFileExists(root, urlPath string) bool {
+	clean := path.Clean("/" + urlPath)
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(clean)))
+	return err == nil && info.Mode().IsRegular()
+}
+
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string) {
 	// Let's Encrypt HTTP-01 challenges: always served over HTTP for any
 	// domain, before routing and before any HTTPS redirect.
@@ -269,11 +277,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 				return
 			}
 		}
-		if h.acmeWebroot != "" {
+		if h.acmeWebroot != "" && acmeFileExists(h.acmeWebroot, r.URL.Path) {
 			h.serveStatic(w, r, h.acmeWebroot)
 			return
 		}
-		*matched = "" // not a challenge we know: route normally
+		// Not a token this gateway issued (built-in issuer / certbot webroot):
+		// it may belong to an ACME client behind the proxy, so route it to the
+		// domain's backend like any other request.
+		*matched = ""
 	}
 
 	// Canary for health gates during updates: answered by the gateway itself, for any host.

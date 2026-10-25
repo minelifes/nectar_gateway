@@ -83,6 +83,8 @@ Push setup (ntfy, free): install the ntfy app ([Android](https://play.google.com
 - **Limits:** `timeout_seconds` (time to response headers, default 60 s → 504) and `max_body_mb` (→ 413) per route.
 - **Metrics & access log:** `GET /api/metrics?minutes=60&domain=&series=1` — per-domain requests, RPS, status classes, bytes, p50/p95/p99 latency, per-minute series (in memory, last 60 minutes). `GET /api/access-log?domain=&status=5xx&ip=&limit=` — the last `ACCESS_LOG_SIZE` (2000) requests, newest first.
 - **Fallback & TLS passthrough (migrations):** `PUT /api/settings {fallback_http, fallback_tls}` (`host:port`). Requests for hosts without a route go to `fallback_http` instead of 410; HTTPS connections whose host has no certificate here are forwarded untouched (SNI passthrough) to `fallback_tls`, so a previous proxy keeps serving its own certificates. `FALLBACK_HTTP` / `FALLBACK_TLS` env vars are the defaults.
+- **Fallback hits:** `GET /api/fallback-hits` lists every host that reached the fallback upstream (HTTP and TLS counts, first and last seen). The counters survive restarts; `DELETE /api/fallback-hits` resets them. The panel uses them to decide when the old proxy can be removed.
+- **Block an IP by hand:** `POST /api/blocked {ip, reason, ttl_seconds}` (no TTL = permanent; used when importing a standalone gateway's block list).
 - `GET /api/version` → `{version, api_version, headless}`, `GET /healthz`, `GET /readyz` (no auth). The proxy answers `/__nectar/canary` with `200 ok` for any host (update health checks).
 
 ### Service token & headless mode

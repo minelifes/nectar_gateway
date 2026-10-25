@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -105,6 +107,9 @@ func (s *Server) Handler() http.Handler {
 	}))
 	mux.HandleFunc("GET /api/blocked", s.requireAuth(s.listBlocked))
 	mux.HandleFunc("DELETE /api/blocked/{ip}", s.requireAuth(s.unblockIP))
+	mux.HandleFunc("POST /api/blocked", s.requireAuth(s.blockIP))
+	mux.HandleFunc("GET /api/fallback-hits", s.requireAuth(s.getFallbackHits))
+	mux.HandleFunc("DELETE /api/fallback-hits", s.requireAuth(s.resetFallbackHits))
 	mux.HandleFunc("PUT /api/routes/{id}/cert", s.requireAuth(s.uploadCert))
 	mux.HandleFunc("DELETE /api/routes/{id}/cert", s.requireAuth(s.deleteCert))
 	mux.HandleFunc("GET /api/metrics", s.requireAuth(s.getMetrics))
@@ -437,6 +442,48 @@ func (s *Server) listBlocked(w http.ResponseWriter, r *http.Request) {
 	list := s.store.ListBlocked()
 	sort.Slice(list, func(i, j int) bool { return list[i].BlockedAt.After(list[j].BlockedAt) })
 	writeJSON(w, http.StatusOK, list)
+}
+
+// blockIP adds a block (used when importing a standalone gateway's blocklist, or by an admin).
+// Body: {"ip": "1.2.3.4", "reason": "…", "ttl_seconds": 86400}; ttl_seconds 0 = 10 years.
+func (s *Server) blockIP(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		IP         string `json:"ip"`
+		Reason     string `json:"reason"`
+		TTLSeconds int64  `json:"ttl_seconds"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ip := net.ParseIP(strings.TrimSpace(in.IP))
+	if ip == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip must be an IPv4 or IPv6 address"})
+		return
+	}
+	ttl := time.Duration(in.TTLSeconds) * time.Second
+	if in.TTLSeconds <= 0 {
+		ttl = 10 * 365 * 24 * time.Hour
+	}
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		reason = "blocked by an administrator"
+	}
+	if err := s.store.Block(ip.String(), reason, ttl); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// getFallbackHits lists hosts served by the fallback upstream / TLS passthrough (migration soak).
+func (s *Server) getFallbackHits(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": orEmpty(s.metrics.FallbackHits())})
+}
+
+func (s *Server) resetFallbackHits(w http.ResponseWriter, r *http.Request) {
+	s.metrics.ResetFallbackHits()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) unblockIP(w http.ResponseWriter, r *http.Request) {

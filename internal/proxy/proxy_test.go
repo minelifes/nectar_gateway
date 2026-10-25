@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -111,6 +112,33 @@ func TestPathRoutingErrorsCanaryChallenge(t *testing.T) {
 	}
 	if code, body := get(t, ts, "shop.example.com", "/.well-known/acme-challenge/tok"); code != 200 || body != "keyauth-tok" {
 		t.Fatalf("acme challenge: %d %q", code, body)
+	}
+}
+
+func TestUnknownAcmeTokenIsProxiedToBackend(t *testing.T) {
+	ts, st := setup(t)
+	root := t.TempDir()
+	dir := filepath.Join(root, ".well-known", "acme-challenge")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "known"), []byte("webroot-answer"), 0o644)
+	h := New(st, root)
+	h.Challenge = func(string) (string, bool) { return "", false }
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+
+	bh, bp := backend(t, "app")
+	st.Create(&store.Route{Domain: "shop.example.com", TargetIP: bh, TargetPort: bp})
+
+	if code, body := get(t, srv, "shop.example.com", "/.well-known/acme-challenge/known"); code != 200 || body != "webroot-answer" {
+		t.Fatalf("webroot token: %d %q", code, body)
+	}
+	if code, body := get(t, srv, "shop.example.com", "/.well-known/acme-challenge/other"); code != 200 || !strings.HasPrefix(body, "app ") {
+		t.Fatalf("unknown token should reach the backend: %d %q", code, body)
+	}
+	if code, _ := get(t, srv, "nobody.example.com", "/.well-known/acme-challenge/other"); code != 410 {
+		t.Fatalf("unknown domain: %d", code)
 	}
 }
 

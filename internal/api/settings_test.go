@@ -107,3 +107,36 @@ func mustBcrypt(t *testing.T, pw string) string {
 	}
 	return string(b)
 }
+
+func TestBlockAndFallbackHitsAPI(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "gw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := metrics.New(10)
+	rec.RecordFallback("old.example.com", metrics.FallbackKindTLS)
+	srv := New(st, "", "", nil, certbot.Config{}, health.New(st, ""), Options{APIToken: svcToken, Metrics: rec})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	if code, _ := call(t, ts, "POST", "/api/blocked", svcToken, map[string]any{"ip": "nope"}); code != 400 {
+		t.Fatalf("bad ip accepted: %d", code)
+	}
+	if code, _ := call(t, ts, "POST", "/api/blocked", "", map[string]any{"ip": "9.9.9.9"}); code != 401 {
+		t.Fatalf("anonymous block: %d", code)
+	}
+	if code, _ := call(t, ts, "POST", "/api/blocked", svcToken, map[string]any{"ip": "9.9.9.9", "reason": "imported"}); code != 204 {
+		t.Fatalf("block: %d", code)
+	}
+	if !st.IsBlocked("9.9.9.9") {
+		t.Fatal("not blocked")
+	}
+	code, v := call(t, ts, "GET", "/api/fallback-hits", svcToken, nil)
+	hosts, _ := v["hosts"].([]any)
+	if code != 200 || len(hosts) != 1 || hosts[0].(map[string]any)["tls"].(float64) != 1 {
+		t.Fatalf("fallback hits: %d %v", code, v)
+	}
+	if code, _ := call(t, ts, "DELETE", "/api/fallback-hits", svcToken, nil); code != 204 || len(rec.FallbackHits()) != 0 {
+		t.Fatalf("reset: %d", code)
+	}
+}

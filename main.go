@@ -61,6 +61,9 @@ func envInt(key string, def int) int {
 	return def
 }
 
+// fallbackHitsKey is the kv key of the persisted fallback hit counters.
+const fallbackHitsKey = "fallback_hits"
+
 func main() {
 	proxyAddr := env("PROXY_ADDR", ":8080")
 	httpsAddr := env("HTTPS_ADDR", ":8443")
@@ -95,6 +98,21 @@ func main() {
 		log.Fatalf("settings: %v", err)
 	}
 	rec := metrics.New(envInt("ACCESS_LOG_SIZE", 2000))
+	// fallback hit counters survive restarts (they tell which hosts still need the old proxy)
+	if b, err := st.GetKV(fallbackHitsKey); err == nil {
+		if err := rec.RestoreFallback(b); err != nil {
+			log.Printf("fallback hits: %v", err)
+		}
+	}
+	go func() {
+		for range time.Tick(time.Minute) {
+			if b := rec.FallbackSnapshot(); b != nil {
+				if err := st.SetKV(fallbackHitsKey, b); err != nil {
+					log.Printf("save fallback hits: %v", err)
+				}
+			}
+		}
+	}()
 
 	var ui fs.FS
 	if !headless {
@@ -133,7 +151,13 @@ func main() {
 			log.Printf("admin UI listening on %s (user: %s)", adminAddr, adminUser)
 		}
 		for {
-			err := adminSrv.ListenAndServe()
+			// SO_REUSEPORT: during a rolling update the surge pod (hostNetwork) binds next to the old one
+			var err error
+			if ls, lerr := reuseportListeners(adminAddr, 1); lerr != nil {
+				err = lerr
+			} else {
+				err = adminSrv.Serve(ls[0])
+			}
 			if errors.Is(err, http.ErrServerClosed) {
 				return
 			}
@@ -158,6 +182,7 @@ func main() {
 		if _, ok := st.CertRoute(strings.ToLower(sni)); ok {
 			return ""
 		}
+		rec.RecordFallback(sni, metrics.FallbackKindTLS)
 		return target
 	}
 
@@ -225,6 +250,10 @@ func main() {
 		_ = httpSrv.Shutdown(ctx)
 		_ = httpsSrv.Shutdown(ctx)
 		_ = adminSrv.Shutdown(ctx)
+		// keep the fallback counters of the last minute (rolling updates restart the gateway)
+		if b := rec.FallbackSnapshot(); b != nil {
+			_ = st.SetKV(fallbackHitsKey, b)
+		}
 		close(done)
 	}()
 

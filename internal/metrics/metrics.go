@@ -59,6 +59,9 @@ type Recorder struct {
 	next    int // ring position
 	full    bool
 	now     func() time.Time
+
+	fallback      map[string]*FallbackHit // host -> long-lived fallback counters
+	fallbackDirty bool
 }
 
 // New returns a recorder keeping logSize access-log entries.
@@ -119,6 +122,9 @@ func (r *Recorder) Record(e Entry) {
 	slot.bytesIn += e.BytesIn
 	slot.latency[bucket(e.MS)]++
 	d.last = now.Unix()
+	if e.Domain == Fallback {
+		r.recordFallbackLocked(e.Host, FallbackKindHTTP, now)
+	}
 
 	r.log[r.next] = e
 	r.next = (r.next + 1) % len(r.log)

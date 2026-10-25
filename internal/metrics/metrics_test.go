@@ -71,3 +71,34 @@ func TestAccessLogRing(t *testing.T) {
 		t.Fatal("nil recorder")
 	}
 }
+
+func TestFallbackHits(t *testing.T) {
+	r := New(10)
+	r.Record(Entry{Domain: Fallback, Host: "old.example.com:80", Status: 200})
+	r.Record(Entry{Domain: Fallback, Host: "old.example.com", Status: 404})
+	r.RecordFallback("Legacy.Example.com.", FallbackKindTLS)
+	r.Record(Entry{Domain: "app.io", Host: "app.io", Status: 200})
+	hits := r.FallbackHits()
+	if len(hits) != 2 {
+		t.Fatalf("hits: %+v", hits)
+	}
+	by := map[string]FallbackHit{}
+	for _, h := range hits {
+		by[h.Host] = h
+	}
+	if by["old.example.com"].HTTP != 2 || by["legacy.example.com"].TLS != 1 || by["old.example.com"].FirstSeen.IsZero() {
+		t.Fatalf("counts: %+v", by)
+	}
+	snap := r.FallbackSnapshot()
+	if snap == nil || r.FallbackSnapshot() != nil {
+		t.Fatal("snapshot must be returned once per change")
+	}
+	r2 := New(10)
+	if err := r2.RestoreFallback(snap); err != nil || len(r2.FallbackHits()) != 2 {
+		t.Fatalf("restore: %v %+v", err, r2.FallbackHits())
+	}
+	r2.ResetFallbackHits()
+	if len(r2.FallbackHits()) != 0 || r2.FallbackSnapshot() == nil {
+		t.Fatal("reset")
+	}
+}
