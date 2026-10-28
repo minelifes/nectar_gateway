@@ -93,7 +93,8 @@ func main() {
 		log.Fatalf("store: %v", err)
 	}
 	// FALLBACK_HTTP / FALLBACK_TLS are defaults; values set through PUT /api/settings win.
-	cfg, err := settings.Load(st, settings.Values{FallbackHTTP: os.Getenv("FALLBACK_HTTP"), FallbackTLS: os.Getenv("FALLBACK_TLS")})
+	cfg, err := settings.Load(st, settings.Values{FallbackHTTP: os.Getenv("FALLBACK_HTTP"), FallbackTLS: os.Getenv("FALLBACK_TLS"),
+		ACMEEmail: os.Getenv("ACME_EMAIL")})
 	if err != nil {
 		log.Fatalf("settings: %v", err)
 	}
@@ -123,10 +124,12 @@ func main() {
 		log.Printf("headless mode: admin UI disabled (ADMIN_UI=false), API only")
 	}
 
-	// Built-in Let's Encrypt (replaces certbot) when ACME_EMAIL is set.
+	// Built-in Let's Encrypt (replaces certbot) when ACME=true or an ACME email is set (env ACME_EMAIL or
+	// PUT /api/settings acme_email). The email can change at runtime.
 	var issuer *acme.Issuer
-	if email := os.Getenv("ACME_EMAIL"); email != "" || os.Getenv("ACME") == "true" {
+	if email := cfg.Get().ACMEEmail; email != "" || os.Getenv("ACME") == "true" {
 		issuer = acme.New(st, email, os.Getenv("ACME_DIRECTORY"))
+		cfg.OnChange(func(v settings.Values) { issuer.SetEmail(v.ACMEEmail) })
 		go issuer.RunRenewals(context.Background(), 12*time.Hour)
 		log.Printf("acme: built-in Let's Encrypt client enabled (%s)", env("ACME_DIRECTORY", acme.LetsEncrypt))
 	}

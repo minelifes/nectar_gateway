@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,8 @@ type Values struct {
 	// FallbackTLS is "host:port" that receives the raw TLS stream (SNI passthrough) for HTTPS
 	// connections whose host has no certificate here. "" = terminate TLS here (handshake fails).
 	FallbackTLS string `json:"fallback_tls"`
+	// ACMEEmail is the Let's Encrypt account contact ("" = no contact). Defaults to ACME_EMAIL.
+	ACMEEmail string `json:"acme_email"`
 }
 
 // KV is the storage (implemented by store.Store).
@@ -34,6 +37,15 @@ type Settings struct {
 	kv KV
 	mu sync.RWMutex
 	v  Values
+
+	hooks []func(Values)
+}
+
+// OnChange registers fn to run after every successful Set (e.g. to update the ACME account contact).
+func (s *Settings) OnChange(fn func(Values)) {
+	s.mu.Lock()
+	s.hooks = append(s.hooks, fn)
+	s.mu.Unlock()
 }
 
 // Load reads the stored settings; defaults (e.g. from env vars) apply to fields never set via the API.
@@ -75,6 +87,7 @@ func (s *Settings) Get() Values {
 // Set validates, stores and applies new values.
 func (s *Settings) Set(v Values) error {
 	v.FallbackHTTP, v.FallbackTLS = strings.TrimSpace(v.FallbackHTTP), strings.TrimSpace(v.FallbackTLS)
+	v.ACMEEmail = strings.TrimSpace(v.ACMEEmail)
 	if err := v.Validate(); err != nil {
 		return err
 	}
@@ -84,12 +97,21 @@ func (s *Settings) Set(v Values) error {
 	}
 	s.mu.Lock()
 	s.v = v
+	hooks := append([]func(Values){}, s.hooks...)
 	s.mu.Unlock()
+	for _, fn := range hooks {
+		fn(v)
+	}
 	return nil
 }
 
+var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+
 // Validate checks the values.
 func (v Values) Validate() error {
+	if v.ACMEEmail != "" && !emailRe.MatchString(v.ACMEEmail) {
+		return errors.New("acme_email must be an email address")
+	}
 	for name, hp := range map[string]string{"fallback_http": v.FallbackHTTP, "fallback_tls": v.FallbackTLS} {
 		if hp == "" {
 			continue

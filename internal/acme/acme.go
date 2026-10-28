@@ -53,6 +53,42 @@ func New(st *store.Store, email, directory string) *Issuer {
 	return &Issuer{store: st, email: email, directory: directory}
 }
 
+// SetEmail changes the account contact. An already registered account is updated at Let's Encrypt
+// (best effort, in the background); otherwise the email is used at registration.
+func (i *Issuer) SetEmail(email string) {
+	i.mu.Lock()
+	if email == i.email {
+		i.mu.Unlock()
+		return
+	}
+	i.email = email
+	c := i.client
+	i.mu.Unlock()
+	if c == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		acct := &xacme.Account{Contact: []string{}}
+		if email != "" {
+			acct.Contact = []string{"mailto:" + email}
+		}
+		if _, err := c.UpdateReg(ctx, acct); err != nil {
+			log.Printf("acme: update account contact: %v", err)
+		} else {
+			log.Printf("acme: account contact set to %q", email)
+		}
+	}()
+}
+
+// Email returns the current account contact.
+func (i *Issuer) Email() string {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.email
+}
+
 // ChallengeResponse returns the key authorization for an HTTP-01 token (served by the proxy at
 // /.well-known/acme-challenge/<token>).
 func (i *Issuer) ChallengeResponse(token string) (string, bool) {

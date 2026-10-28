@@ -630,6 +630,6 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	log.Printf("settings: fallback_http=%q fallback_tls=%q", v.FallbackHTTP, v.FallbackTLS)
+	log.Printf("settings: fallback_http=%q fallback_tls=%q acme_email=%q", v.FallbackHTTP, v.FallbackTLS, v.ACMEEmail)
 	writeJSON(w, http.StatusOK, s.settings.Get())
 }

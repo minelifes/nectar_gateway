@@ -116,7 +116,7 @@ func TestPathRoutingErrorsCanaryChallenge(t *testing.T) {
 }
 
 func TestUnknownAcmeTokenIsProxiedToBackend(t *testing.T) {
-	ts, st := setup(t)
+	_, st := setup(t)
 	root := t.TempDir()
 	dir := filepath.Join(root, ".well-known", "acme-challenge")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
