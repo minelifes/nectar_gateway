@@ -41,7 +41,7 @@ type Store struct {
 }
 
 // schemaVersion is stored in PRAGMA user_version.
-const schemaVersion = 4 // v4: standalone (wildcard) certificates
+const schemaVersion = 5 // v4: standalone (wildcard) certificates; v5: routes.web (redirect rules, allowlist, headers, CORS, HSTS)
 
 func New(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -101,6 +101,7 @@ const routesTable = `CREATE TABLE routes (
 	redirect_code INTEGER NOT NULL DEFAULT 0,
 	basic_auth TEXT NOT NULL DEFAULT '',
 	updated_at INTEGER NOT NULL DEFAULT 0,
+	web TEXT NOT NULL DEFAULT '',
 	UNIQUE (domain, path_prefix)
 )`
 
@@ -163,6 +164,11 @@ func migrate(db *sql.DB) error {
 			if _, err := tx.Exec(`ALTER TABLE routes ADD COLUMN ` + col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 				return err
 			}
+		}
+	}
+	if hasRoutes > 0 && version < 5 {
+		if _, err := tx.Exec(`ALTER TABLE routes ADD COLUMN web TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
 		}
 	}
 	for _, stmt := range []string{

@@ -121,6 +121,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/certificates/{id}", s.requireAuth(s.uploadCertificatePair))
 	mux.HandleFunc("POST /api/certificates/{id}/renew", s.requireAuth(s.renewCertificate))
 	mux.HandleFunc("DELETE /api/certificates/{id}", s.requireAuth(s.deleteCertificate))
+	mux.HandleFunc("GET /api/dns/records", s.requireAuth(s.listDNSRecords))
+	mux.HandleFunc("PUT /api/dns/records", s.requireAuth(s.putDNSRecords))
+	mux.HandleFunc("DELETE /api/dns/records", s.requireAuth(s.deleteDNSRecords))
 
 	// unauthenticated: probes and version discovery
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
@@ -283,7 +286,12 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 
 // Features lists optional API parts, so controllers can tell what this gateway build supports.
 func (s *Server) features() []string {
-	f := []string{"certificates", "rate-limit-429"} // standalone / wildcard certificates; rate limits answer 429
+	// standalone / wildcard certificates; rate limits answer 429; per-route web options (redirect rules,
+	// IP allowlist, headers, CORS, gzip, HSTS)
+	f := []string{"certificates", "rate-limit-429", "web-options"}
+	if s.settings != nil && s.settings.Get().DNSProvider != "" {
+		f = append(f, "dns-records") // PUT/DELETE /api/dns/records
+	}
 	if ci := s.certIssuer(); ci != nil {
 		f = append(f, "acme")
 		if ci.HasDNS() {

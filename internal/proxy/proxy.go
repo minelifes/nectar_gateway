@@ -148,6 +148,7 @@ func (h *Handler) newReverseProxy(transport http.RoundTripper) *httputil.Reverse
 			pr.SetURL(target)
 			pr.Out.Host = pr.In.Host // preserve original Host header
 			pr.SetXForwarded()       // X-Forwarded-For / -Host / -Proto
+			applyRequestHeaders(pr.Out, route.Web)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if r.Context().Err() != nil {
@@ -359,6 +360,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 		return
 	}
 	*matched = route.Domain
+	if !route.Web.Allowed(ip) {
+		errorPage(w, r, http.StatusForbidden, "Access restricted", "This site only accepts visitors from allowed networks.")
+		return
+	}
 	if route.RateLimit > 0 && !h.rate.allow(ip+"|"+route.Domain, route.RateLimit) {
 		// over the limit: 429, the client may retry in a second. Only sustained abuse (more than ten
 		// times the limit rejected within a minute) blocks the IP, for RateLimitBlock.
@@ -377,6 +382,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 			u.Scheme = "https"
 			u.Host = host
 			http.Redirect(w, r, u.String(), http.StatusMovedPermanently)
+			return
+		}
+	}
+	origin := ""
+	if route.Web != nil {
+		origin = corsOrigin(route.Web.CORS, r)
+		if route.Web.CORS != nil && corsPreflight(w, r, route.Web.CORS, origin) {
+			return // CORS preflights carry no credentials: answered before basic auth
+		}
+		var done func()
+		w, done = wrapWeb(w, r, route.Web, origin)
+		defer done()
+		if target, code, ok := route.Web.MatchRedirect(r.URL.Path, r.URL.RawQuery); ok {
+			http.Redirect(w, r, target, code)
 			return
 		}
 	}
