@@ -94,7 +94,8 @@ func main() {
 	}
 	// FALLBACK_HTTP / FALLBACK_TLS are defaults; values set through PUT /api/settings win.
 	cfg, err := settings.Load(st, settings.Values{FallbackHTTP: os.Getenv("FALLBACK_HTTP"), FallbackTLS: os.Getenv("FALLBACK_TLS"),
-		ACMEEmail: os.Getenv("ACME_EMAIL"), DNSProvider: os.Getenv("DNS_PROVIDER"), DNSAPIToken: os.Getenv("DNS_API_TOKEN")})
+		ACMEEmail: os.Getenv("ACME_EMAIL"), DNSProvider: os.Getenv("DNS_PROVIDER"), DNSAPIToken: os.Getenv("DNS_API_TOKEN"),
+		RateLimitBlockMinutes: envInt("RATE_LIMIT_BLOCK_MINUTES", 10)})
 	if err != nil {
 		log.Fatalf("settings: %v", err)
 	}
@@ -186,6 +187,7 @@ func main() {
 	}
 	p.Metrics = rec
 	p.FallbackTarget = func() string { return cfg.Get().FallbackHTTP }
+	p.RateLimitBlock = func() time.Duration { return time.Duration(cfg.Get().RateLimitBlockMinutes) * time.Minute }
 	// SNI passthrough: TLS for hosts without a certificate here goes to FALLBACK_TLS untouched.
 	decide := func(sni string) string {
 		target := cfg.Get().FallbackTLS

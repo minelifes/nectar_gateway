@@ -40,6 +40,10 @@ type Handler struct {
 	certs       map[string]*cachedCert // domain -> cert
 	unknown     *hitTracker            // scanner detection on unknown domains
 	rate        *hitTracker            // per-domain per-IP rate limiting
+	abuse       *hitTracker            // rejected requests per minute (sustained abuse → block)
+	// RateLimitBlock is how long a client that keeps exceeding a rate limit is blocked (nil or 0 = never;
+	// over the limit it gets 429 either way).
+	RateLimitBlock func() time.Duration
 	// Challenge answers ACME HTTP-01 tokens from the built-in issuer (nil = webroot only).
 	Challenge func(token string) (string, bool)
 	// Metrics records per-domain statistics and the access log (nil = off).
@@ -58,11 +62,23 @@ type proxyKey struct {
 // DefaultTimeout is the response-header timeout for routes without timeout_seconds (like nginx's 60s).
 const DefaultTimeout = 60 * time.Second
 
+// abuseFactor: a client blocked for RateLimitBlock had more than abuseFactor × limit requests rejected
+// within one minute (e.g. limit 10 req/s → more than 100 rejected in a minute).
+const abuseFactor = 10
+
+func (h *Handler) rateLimitBlock() time.Duration {
+	if h.RateLimitBlock == nil {
+		return 0
+	}
+	return h.RateLimitBlock()
+}
+
 func New(s *store.Store, acmeWebroot string) *Handler {
 	h := &Handler{
 		store: s, acmeWebroot: acmeWebroot, certs: map[string]*cachedCert{},
 		unknown: newHitTracker(10 * time.Minute),
 		rate:    newHitTracker(time.Second),
+		abuse:   newHitTracker(time.Minute),
 		proxies: map[proxyKey]*httputil.ReverseProxy{},
 		auth:    newAuthCache(),
 	}
@@ -343,15 +359,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 		return
 	}
 	*matched = route.Domain
-	if route.RateLimit > 0 && h.rate.note(ip+"|"+route.Domain, route.RateLimit) {
-		if err := h.store.Block(ip, fmt.Sprintf("rate limit: more than %d req/s on %s", route.RateLimit, route.Domain), BlockTTL); err == nil {
-			log.Printf("blocked %s for 24h: rate limit on %s", ip, route.Domain)
+	if route.RateLimit > 0 && !h.rate.allow(ip+"|"+route.Domain, route.RateLimit) {
+		// over the limit: 429, the client may retry in a second. Only sustained abuse (more than ten
+		// times the limit rejected within a minute) blocks the IP, for RateLimitBlock.
+		if d := h.rateLimitBlock(); d > 0 && h.abuse.note(ip+"|"+route.Domain, abuseFactor*route.RateLimit) {
+			if err := h.store.Block(ip, fmt.Sprintf("rate limit: kept exceeding %d req/s on %s", route.RateLimit, route.Domain), d); err == nil {
+				log.Printf("blocked %s for %s: kept exceeding the rate limit on %s", ip, d, route.Domain)
+			}
 		}
-		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		w.Header().Set("Retry-After", "1")
+		errorPage(w, r, http.StatusTooManyRequests, "Too many requests", "Slow down a little and try again in a moment.")
 		return
 	}
 	if r.TLS == nil && route.ForceSSL {
-		if _, hasCert := h.store.CertRoute(host); hasCert {
+		if hasCert := h.store.HasTLS(host); hasCert { // own certificate or a covering wildcard
 			u := *r.URL
 			u.Scheme = "https"
 			u.Host = host

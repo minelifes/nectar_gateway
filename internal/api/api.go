@@ -282,7 +282,7 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 
 // Features lists optional API parts, so controllers can tell what this gateway build supports.
 func (s *Server) features() []string {
-	f := []string{"certificates"} // standalone / wildcard certificates (/api/certificates)
+	f := []string{"certificates", "rate-limit-429"} // standalone / wildcard certificates; rate limits answer 429
 	if ci := s.certIssuer(); ci != nil {
 		f = append(f, "acme")
 		if ci.HasDNS() {
@@ -322,7 +322,7 @@ func (s *Server) createRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.autoIssue(rt)
-	writeJSON(w, http.StatusCreated, rt)
+	writeJSON(w, http.StatusCreated, s.store.WithCoverage([]store.Route{rt})[0])
 }
 
 func routeErrStatus(err error) int {
@@ -373,7 +373,7 @@ func (s *Server) updateRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.autoIssue(rt)
-	writeJSON(w, http.StatusOK, rt)
+	writeJSON(w, http.StatusOK, s.store.WithCoverage([]store.Route{rt})[0])
 }
 
 // importNginx parses an nginx config. With dry_run=true it only returns the
@@ -654,6 +654,6 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	log.Printf("settings: fallback_http=%q fallback_tls=%q acme_email=%q dns_provider=%q", v.FallbackHTTP, v.FallbackTLS, v.ACMEEmail, v.DNSProvider)
+	log.Printf("settings: fallback_http=%q fallback_tls=%q acme_email=%q dns_provider=%q rate_limit_block_minutes=%d", v.FallbackHTTP, v.FallbackTLS, v.ACMEEmail, v.DNSProvider, v.RateLimitBlockMinutes)
 	writeJSON(w, http.StatusOK, s.settings.Get().Public())
 }

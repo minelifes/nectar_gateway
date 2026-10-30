@@ -74,7 +74,7 @@ func TestCertificatesAPIAndDNSSettings(t *testing.T) {
 
 	// features tell controllers what this build can do
 	_, v := call(t, ts, "GET", "/api/version", "", nil)
-	if f, _ := json.Marshal(v["features"]); string(f) != `["certificates","acme"]` {
+	if f, _ := json.Marshal(v["features"]); string(f) != `["certificates","rate-limit-429","acme"]` {
 		t.Fatalf("features %s", f)
 	}
 	// a wildcard needs the DNS provider first
@@ -130,8 +130,8 @@ func TestCertificatesAPIAndDNSSettings(t *testing.T) {
 	if _, err := st.SetCertificatePair(id, certPEM, keyPEM, "acme"); err != nil {
 		t.Fatal(err)
 	}
-	if code, v := call(t, ts, "POST", "/api/routes", svcToken, map[string]any{"domain": "web-shop.apps.example.com", "target_ip": "10.0.0.1", "force_ssl": true}); code != 201 {
-		t.Fatalf("route on a covered host: %d %v", code, v)
+	if code, v := call(t, ts, "POST", "/api/routes", svcToken, map[string]any{"domain": "web-shop.apps.example.com", "target_ip": "10.0.0.1", "force_ssl": true}); code != 201 || v["covered_by"] != "*.apps.example.com" {
+		t.Fatalf("route on a covered host (the answer shows the coverage): %d %v", code, v)
 	}
 	routes := getList(t, ts, "/api/routes")
 	if len(routes) != 1 || routes[0]["covered_by"] != "*.apps.example.com" {
