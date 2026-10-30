@@ -5,6 +5,25 @@
       "stable": [
         {
           "component": "gateway",
+          "version": "1.2.4",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:13c6c22712b4bac9b6d79d64b561ba77c2a1b080a74e2763d3a7d039578bc956",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": true,
+          "notes": "- Feature update for nectar_apps\n- license",
+          "previous": "1.2.3",
+          "published_at": "2026-10-30T22:08:02+00:00"
+        },
+        {
+          "component": "gateway",
           "version": "1.2.3",
           "channel": "stable",
           "image": "ghcr.io/minelifes/nectar-gateway@sha256:6fb54d9c2cc37053d27740a067cd9b37884511676eef3356ab35939e1af9738d",
@@ -81,6 +100,25 @@
         }
       ],
       "beta": [
+        {
+          "component": "gateway",
+          "version": "1.2.4",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:13c6c22712b4bac9b6d79d64b561ba77c2a1b080a74e2763d3a7d039578bc956",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": true,
+          "notes": "- Feature update for nectar_apps\n- license",
+          "previous": "1.2.3",
+          "published_at": "2026-10-30T22:08:02+00:00"
+        },
         {
           "component": "gateway",
           "version": "1.2.3",
@@ -160,5 +198,5 @@
       ]
     }
   },
-  "updated_at": "2026-10-30T15:29:59+00:00"
+  "updated_at": "2026-10-30T22:08:02+00:00"
 }
