@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2](https://github.com/minelifes/nectar_gateway/compare/v1.2.1...v1.2.2) (2026-10-30)
+
+
+### Miscellaneous Chores
+
+* release 1.2.0 ([9c75f71](https://github.com/minelifes/nectar_gateway/commit/9c75f7122553993b3bd763c97392af7e665fc162))
+* release 1.2.2 ([04cfb30](https://github.com/minelifes/nectar_gateway/commit/04cfb30ccef83f103b4f76f631f415b26537172c))
+
 ## [1.2.1](https://github.com/minelifes/nectar_gateway/compare/v1.2.0...v1.2.1) (2026-10-28)
 
 
