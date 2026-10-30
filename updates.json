@@ -5,6 +5,25 @@
       "stable": [
         {
           "component": "gateway",
+          "version": "1.2.3",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:6fb54d9c2cc37053d27740a067cd9b37884511676eef3356ab35939e1af9738d",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": false,
+          "notes": "- fix sesion cookie in http",
+          "previous": "1.2.2",
+          "published_at": "2026-10-30T15:29:59+00:00"
+        },
+        {
+          "component": "gateway",
           "version": "1.2.2",
           "channel": "stable",
           "image": "ghcr.io/minelifes/nectar-gateway@sha256:0412ff70081e36bef6a859a3c3b218bcaf3fb61fcad4288290dbb9a8419288c1",
@@ -62,6 +81,25 @@
         }
       ],
       "beta": [
+        {
+          "component": "gateway",
+          "version": "1.2.3",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:6fb54d9c2cc37053d27740a067cd9b37884511676eef3356ab35939e1af9738d",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": false,
+          "notes": "- fix sesion cookie in http",
+          "previous": "1.2.2",
+          "published_at": "2026-10-30T15:29:59+00:00"
+        },
         {
           "component": "gateway",
           "version": "1.2.2",
@@ -122,5 +160,5 @@
       ]
     }
   },
-  "updated_at": "2026-10-30T00:18:20+00:00"
+  "updated_at": "2026-10-30T15:29:59+00:00"
 }
