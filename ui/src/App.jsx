@@ -27,6 +27,7 @@ import {
   CallMade as CallMadeIcon
 } from '@mui/icons-material'
 import { CircularProgress } from '@mui/material'
+import WebOptions, { formToWeb, webToForm } from './WebOptions.jsx'
 import {
   GppBad as GppBadIcon,
   Dns as DnsListIcon,
@@ -54,7 +55,10 @@ const empty = {
 }
 
 // the dialog edits basic-auth users as a list; an empty password keeps the stored one
-const withAuth = (r) => ({ ...r, auth: (r.auth_usernames || []).map((user) => ({ user, password: '' })), authEdited: false })
+const withAuth = (r) => ({
+  ...r, auth: (r.auth_usernames || []).map((user) => ({ user, password: '' })), authEdited: false,
+  webForm: webToForm(r.web), webEdited: false
+})
 
 const hasCert = (r) => (r.cert_file && r.key_file) || r.cert_not_after > 0
 
@@ -198,7 +202,7 @@ export default function App() {
   const save = async (thenCert = false) => {
     const { mode, route } = dialog
     const url = mode === 'add' ? '/api/routes' : `/api/routes/${route.id}`
-    const { auth, authEdited, auth_usernames: _u, auth_fingerprint: _f, covered_by: _c, covered_until: _cu, ...rest } = route
+    const { auth, authEdited, webForm, webEdited, web: _w, auth_usernames: _u, auth_fingerprint: _f, covered_by: _c, covered_until: _cu, ...rest } = route
     const payload = {
       ...rest,
       target_port: Number(route.target_port) || 80,
@@ -208,6 +212,7 @@ export default function App() {
       max_body_mb: Number(route.max_body_mb) || 0,
       redirect_code: Number(route.redirect_code) || 301
     }
+    if (webEdited || mode === 'add') payload.web = formToWeb(webForm)
     if (authEdited) payload.basic_auth_users = auth.filter((u) => u.user.trim()).map((u) => ({ user: u.user.trim(), password: u.password }))
     try {
       const res = await fetch(url, {
@@ -251,6 +256,7 @@ export default function App() {
     setDialog((d) => ({ ...d, route: { ...d.route, [field]: e.target.value } }))
   const setBool = (field) => (e) =>
     setDialog((d) => ({ ...d, route: { ...d.route, [field]: e.target.checked } }))
+  const setWeb = (webForm) => setDialog((d) => ({ ...d, route: { ...d.route, webForm, webEdited: true } }))
   const setAuth = (fn) => setDialog((d) => ({ ...d, route: { ...d.route, auth: fn(d.route.auth), authEdited: true } }))
 
   // group routes by parent domain, groups and members sorted alphabetically
@@ -577,6 +583,14 @@ export default function App() {
               onClick={() => setAuth((a) => [...(a || []), { user: '', password: '' }])}>
               Add user
             </Button>
+            {(dialog?.route.mode ?? 'proxy') !== 'redirect' && dialog?.route.webForm && (
+              <>
+                <Divider>
+                  <Typography variant="caption" color="text.secondary">Redirects, access, headers (optional)</Typography>
+                </Divider>
+                <WebOptions form={dialog.route.webForm} onChange={setWeb} />
+              </>
+            )}
             <Divider>
               <Typography variant="caption" color="text.secondary">SSL (optional)</Typography>
             </Divider>

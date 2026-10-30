@@ -77,6 +77,8 @@ type Route struct {
 	// wildcard) that serves this host because the route has no certificate of its own.
 	CoveredBy    string `json:"covered_by,omitempty"`
 	CoveredUntil int64  `json:"covered_until,omitempty"`
+	// Web: redirect rules, IP allowlist, headers, CORS, compression, HSTS. Omitted in an update = keep.
+	Web *Web `json:"web,omitempty"`
 }
 
 // AuthUser is a basic-auth user in API requests. An empty password keeps the user's current password.
@@ -93,14 +95,16 @@ func (r Route) HasSSL() bool {
 const routeCols = `id, domain, path_prefix, mode, target_ip, target_port, target_https, rate_limit, hc_enabled, hc_path,
 	hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl, managed_by, owner, cert_pem, key_pem,
 	cert_source, cert_not_after, acme, maintenance, backend_protocol, timeout_seconds, max_body_mb, redirect_url,
-	redirect_code, basic_auth, updated_at`
+	redirect_code, basic_auth, updated_at, web`
 
 func scanRoute(sc interface{ Scan(...any) error }) (Route, error) {
 	var r Route
+	var web string
 	err := sc.Scan(&r.ID, &r.Domain, &r.PathPrefix, &r.Mode, &r.TargetIP, &r.TargetPort, &r.TargetHTTPS, &r.RateLimit,
 		&r.HCEnabled, &r.HCPath, &r.HCInterval, &r.HCType, &r.HCExpect, &r.StaticDir, &r.CertFile, &r.KeyFile, &r.ForceSSL,
 		&r.ManagedBy, &r.Owner, &r.CertPEM, &r.KeyPEM, &r.CertSource, &r.CertNotAfter, &r.ACME, &r.Maintenance,
-		&r.BackendProtocol, &r.TimeoutSeconds, &r.MaxBodyMB, &r.RedirectURL, &r.RedirectCode, &r.BasicAuth, &r.UpdatedAt)
+		&r.BackendProtocol, &r.TimeoutSeconds, &r.MaxBodyMB, &r.RedirectURL, &r.RedirectCode, &r.BasicAuth, &r.UpdatedAt, &web)
+	r.Web = decodeWeb(web)
 	r.AuthUsernames = authUsernames(r.BasicAuth)
 	r.AuthFingerprint = AuthFingerprint(r.BasicAuth)
 	return r, err
@@ -360,6 +364,12 @@ func normalize(r *Route) error {
 	if err := applyAuthUsers(r); err != nil {
 		return err
 	}
+	if err := r.Web.Normalize(); err != nil {
+		return err
+	}
+	if r.Web.IsZero() {
+		r.Web = nil
+	}
 	if r.RateLimit < 0 {
 		r.RateLimit = 0
 	}
@@ -416,12 +426,12 @@ func (s *Store) Create(r *Route) error {
 	res, err := s.db.Exec(`INSERT INTO routes (domain, path_prefix, mode, target_ip, target_port, target_https, rate_limit,
 		hc_enabled, hc_path, hc_interval, hc_type, hc_expect, static_dir, cert_file, key_file, force_ssl, managed_by, owner,
 		cert_pem, key_pem, cert_source, cert_not_after, acme, maintenance, backend_protocol, timeout_seconds, max_body_mb,
-		redirect_url, redirect_code, basic_auth, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		redirect_url, redirect_code, basic_auth, updated_at, web)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Domain, r.PathPrefix, r.Mode, r.TargetIP, r.TargetPort, r.TargetHTTPS, r.RateLimit, r.HCEnabled, r.HCPath,
 		r.HCInterval, r.HCType, r.HCExpect, r.StaticDir, r.CertFile, r.KeyFile, r.ForceSSL, r.ManagedBy, r.Owner,
 		r.CertPEM, r.KeyPEM, r.CertSource, r.CertNotAfter, r.ACME, r.Maintenance, r.BackendProtocol, r.TimeoutSeconds,
-		r.MaxBodyMB, r.RedirectURL, r.RedirectCode, r.BasicAuth, r.UpdatedAt)
+		r.MaxBodyMB, r.RedirectURL, r.RedirectCode, r.BasicAuth, r.UpdatedAt, encodeWeb(r.Web))
 	if isUnique(err) {
 		return ErrConflict
 	}
@@ -439,6 +449,9 @@ func (s *Store) Update(r *Route) error {
 		// basic_auth_users omitted → keep the current users; present → passwords of listed users
 		// without a new password are kept (applyAuthUsers looks them up in r.BasicAuth)
 		r.BasicAuth = old.BasicAuth
+		if r.Web == nil {
+			r.Web = old.Web // "web" omitted → keep the current options
+		}
 	}
 	if old, ok := s.Get(r.ID); ok && r.CertPEM == "" && r.KeyPEM == "" {
 		r.CertPEM, r.KeyPEM = old.CertPEM, old.KeyPEM
@@ -454,11 +467,11 @@ func (s *Store) Update(r *Route) error {
 		rate_limit=?, hc_enabled=?, hc_path=?, hc_interval=?, hc_type=?, hc_expect=?, static_dir=?, cert_file=?, key_file=?,
 		force_ssl=?, managed_by=?, owner=?, cert_pem=?, key_pem=?, cert_source=?, cert_not_after=?, acme=?, maintenance=?,
 		backend_protocol=?, timeout_seconds=?, max_body_mb=?, redirect_url=?, redirect_code=?, basic_auth=?,
-		updated_at=? WHERE id=?`,
+		updated_at=?, web=? WHERE id=?`,
 		r.Domain, r.PathPrefix, r.Mode, r.TargetIP, r.TargetPort, r.TargetHTTPS, r.RateLimit, r.HCEnabled, r.HCPath,
 		r.HCInterval, r.HCType, r.HCExpect, r.StaticDir, r.CertFile, r.KeyFile, r.ForceSSL, r.ManagedBy, r.Owner,
 		r.CertPEM, r.KeyPEM, r.CertSource, r.CertNotAfter, r.ACME, r.Maintenance, r.BackendProtocol, r.TimeoutSeconds,
-		r.MaxBodyMB, r.RedirectURL, r.RedirectCode, r.BasicAuth, r.UpdatedAt, r.ID)
+		r.MaxBodyMB, r.RedirectURL, r.RedirectCode, r.BasicAuth, r.UpdatedAt, encodeWeb(r.Web), r.ID)
 	if isUnique(err) {
 		return ErrConflict
 	}
