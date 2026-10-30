@@ -121,3 +121,10 @@ Inside Kubernetes the gateway runs as a container (`Dockerfile`) with `hostNetwo
 go run .            # backend
 cd ui && npm run dev  # Vite on :5173, proxies /api to :8081
 ```
+
+## License
+
+Source-available under the [Nectar Source License](LICENSE.md): free for personal use and home labs,
+education and nonprofits, and small businesses (<100 people and <$1M revenue). Commercial licenses:
+support@techbrain.llc. Contributions require the [CLA](CLA.md) — see [CONTRIBUTING.md](CONTRIBUTING.md).
+"Nectar" is a trademark of TechBrain LLC — see [TRADEMARK.md](TRADEMARK.md).
