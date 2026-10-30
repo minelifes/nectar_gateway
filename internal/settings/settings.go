@@ -22,6 +22,9 @@ type Values struct {
 	FallbackTLS string `json:"fallback_tls"`
 	// ACMEEmail is the Let's Encrypt account contact ("" = no contact). Defaults to ACME_EMAIL.
 	ACMEEmail string `json:"acme_email"`
+	// RateLimitBlockMinutes: a client that keeps exceeding a route's rate limit (more than 10× the limit
+	// rejected within a minute) is blocked this long; 0 = never (it only gets 429). Default 10.
+	RateLimitBlockMinutes int `json:"rate_limit_block_minutes"`
 	// DNSProvider answers ACME DNS-01 challenges (needed for wildcard certificates): "" | "cloudflare".
 	DNSProvider string `json:"dns_provider"`
 	// DNSAPIToken is the provider credential (Cloudflare: an API token with Zone:Read and DNS:Edit).
@@ -136,6 +139,9 @@ var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 func (v Values) Validate() error {
 	if v.ACMEEmail != "" && !emailRe.MatchString(v.ACMEEmail) {
 		return errors.New("acme_email must be an email address")
+	}
+	if v.RateLimitBlockMinutes < 0 || v.RateLimitBlockMinutes > 7*24*60 {
+		return errors.New("rate_limit_block_minutes must be 0 (never) to 10080 (a week)")
 	}
 	if v.DNSProvider != "" {
 		known := false

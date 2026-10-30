@@ -19,7 +19,12 @@ import {
   ChevronRight as ChevronRightIcon,
   Language as LanguageIcon,
   EnhancedEncryption as EnhancedEncryptionIcon,
-  UploadFile as UploadFileIcon
+  UploadFile as UploadFileIcon,
+  VerifiedUser as VerifiedUserIcon,
+  Settings as SettingsIcon,
+  Construction as ConstructionIcon,
+  Key as KeyIcon,
+  CallMade as CallMadeIcon
 } from '@mui/icons-material'
 import { CircularProgress } from '@mui/material'
 import {
@@ -31,6 +36,8 @@ import {
 import Login from './Login'
 import ImportNginx from './ImportNginx'
 import BlockedIps from './BlockedIps'
+import Certificates from './Certificates'
+import Settings from './Settings'
 
 // abc.domainA.com -> domainA.com; domainA.com -> domainA.com
 const parentOf = (d) => {
@@ -41,8 +48,18 @@ const parentOf = (d) => {
 const empty = {
   domain: '', path_prefix: '/', mode: 'proxy', target_ip: '', target_port: 80, target_https: false,
   rate_limit: 0, static_dir: '', cert_file: '', key_file: '', force_ssl: false,
-  hc_enabled: false, hc_path: '/', hc_interval: 30, hc_type: 'status', hc_expect: ''
+  hc_enabled: false, hc_path: '/', hc_interval: 30, hc_type: 'status', hc_expect: '',
+  acme: false, maintenance: false, backend_protocol: 'http1', timeout_seconds: 0, max_body_mb: 0,
+  redirect_url: '', redirect_code: 301
 }
+
+// the dialog edits basic-auth users as a list; an empty password keeps the stored one
+const withAuth = (r) => ({ ...r, auth: (r.auth_usernames || []).map((user) => ({ user, password: '' })), authEdited: false })
+
+const hasCert = (r) => (r.cert_file && r.key_file) || r.cert_not_after > 0
+
+const targetReady = (r) => r && r.domain && (
+  r.mode === 'static' ? !!r.static_dir : r.mode === 'redirect' ? !!r.redirect_url : !!r.target_ip)
 
 const hcExpectHelp = {
   status: 'Expected status code, empty = any non-error (2xx/3xx)',
@@ -78,7 +95,8 @@ export default function App() {
   const [ok, setOk] = useState('')
   const [certBusy, setCertBusy] = useState(null) // route id being issued
   const [collapsed, setCollapsed] = useState({}) // parent domain -> bool
-  const [view, setView] = useState('routes') // 'routes' | 'blocked'
+  const [view, setView] = useState('routes') // 'routes' | 'blocked' | 'certificates' | 'settings'
+  const [dnsReady, setDnsReady] = useState(false)
   const [healthMap, setHealthMap] = useState({})
   const [notifOn, setNotifOn] = useState(
     () => typeof Notification !== 'undefined' && Notification.permission === 'granted'
@@ -129,6 +147,12 @@ export default function App() {
     }).catch(() => setAuthed(false))
   }, [load])
 
+  const onSettings = useCallback((v) => setDnsReady(!!v?.dns_provider && !!v?.dns_token_set), [])
+  useEffect(() => {
+    if (!authed) return
+    fetch('/api/settings').then((res) => res.ok ? res.json() : null).then(onSettings).catch(() => {})
+  }, [authed, onSettings])
+
   useEffect(() => {
     if (!authed) return
     const notify = (title, body) => {
@@ -174,16 +198,22 @@ export default function App() {
   const save = async (thenCert = false) => {
     const { mode, route } = dialog
     const url = mode === 'add' ? '/api/routes' : `/api/routes/${route.id}`
+    const { auth, authEdited, auth_usernames: _u, auth_fingerprint: _f, covered_by: _c, covered_until: _cu, ...rest } = route
+    const payload = {
+      ...rest,
+      target_port: Number(route.target_port) || 80,
+      rate_limit: Number(route.rate_limit) || 0,
+      hc_interval: Number(route.hc_interval) || 30,
+      timeout_seconds: Number(route.timeout_seconds) || 0,
+      max_body_mb: Number(route.max_body_mb) || 0,
+      redirect_code: Number(route.redirect_code) || 301
+    }
+    if (authEdited) payload.basic_auth_users = auth.filter((u) => u.user.trim()).map((u) => ({ user: u.user.trim(), password: u.password }))
     try {
       const res = await fetch(url, {
         method: mode === 'add' ? 'POST' : 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...route,
-          target_port: Number(route.target_port) || 80,
-          rate_limit: Number(route.rate_limit) || 0,
-          hc_interval: Number(route.hc_interval) || 30
-        })
+        body: JSON.stringify(payload)
       })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(body.error || res.statusText)
@@ -219,6 +249,9 @@ export default function App() {
 
   const set = (field) => (e) =>
     setDialog((d) => ({ ...d, route: { ...d.route, [field]: e.target.value } }))
+  const setBool = (field) => (e) =>
+    setDialog((d) => ({ ...d, route: { ...d.route, [field]: e.target.checked } }))
+  const setAuth = (fn) => setDialog((d) => ({ ...d, route: { ...d.route, auth: fn(d.route.auth), authEdited: true } }))
 
   // group routes by parent domain, groups and members sorted alphabetically
   const groups = routes.reduce((acc, r) => {
@@ -238,7 +271,7 @@ export default function App() {
           {view === 'routes' && (
             <>
               <Button color="inherit" startIcon={<AddIcon />}
-                onClick={() => setDialog({ mode: 'add', route: { ...empty } })}>
+                onClick={() => setDialog({ mode: 'add', route: withAuth(empty) })}>
                 Add domain
               </Button>
               <Button color="inherit" startIcon={<UploadFileIcon />} sx={{ ml: 1 }}
@@ -261,11 +294,15 @@ export default function App() {
         <Tabs value={view} onChange={(_, v) => setView(v)}
           textColor="inherit" indicatorColor="secondary" sx={{ px: 2 }}>
           <Tab value="routes" label="Domains" icon={<DnsListIcon />} iconPosition="start" sx={{ minHeight: 48 }} />
+          <Tab value="certificates" label="Certificates" icon={<VerifiedUserIcon />} iconPosition="start" sx={{ minHeight: 48 }} />
           <Tab value="blocked" label="Blocked IPs" icon={<GppBadIcon />} iconPosition="start" sx={{ minHeight: 48 }} />
+          <Tab value="settings" label="Settings" icon={<SettingsIcon />} iconPosition="start" sx={{ minHeight: 48 }} />
         </Tabs>
       </AppBar>
 
       {view === 'blocked' && <BlockedIps onError={setError} />}
+      {view === 'certificates' && <Certificates onError={setError} onOk={setOk} dnsReady={dnsReady} />}
+      {view === 'settings' && <Settings onError={setError} onOk={setOk} onChange={onSettings} />}
 
       {view === 'routes' && (
       <Container maxWidth="md" sx={{ mt: 4 }}>
@@ -305,7 +342,7 @@ export default function App() {
                         <IconButton size="small" color="primary"
                           onClick={(e) => {
                             e.stopPropagation()
-                            setDialog({ mode: 'add', suffix: parent, route: { ...empty } })
+                            setDialog({ mode: 'add', suffix: parent, route: withAuth(empty) })
                           }}>
                           <AddIcon fontSize="small" />
                         </IconButton>
@@ -326,29 +363,41 @@ export default function App() {
                         <Chip size="small" variant="outlined" label={r.managed_by} sx={{ ml: 0.75, height: 20 }} />
                       </Tooltip>
                     )}
-                    {r.maintenance && <Chip size="small" color="warning" label="maintenance" sx={{ ml: 0.75, height: 20 }} />}
-                    {((r.cert_file && r.key_file) || r.cert_not_after > 0) && (
-                      <Tooltip title={r.force_ssl ? 'HTTPS (forced)' : 'HTTPS enabled'}>
+                    {r.maintenance && <Chip size="small" color="warning" icon={<ConstructionIcon />} label="maintenance" sx={{ ml: 0.75, height: 20 }} />}
+                    {hasCert(r) && (
+                      <Tooltip title={`${r.force_ssl ? 'HTTPS (forced)' : 'HTTPS enabled'}${r.acme ? ' · renewed automatically' : ''}${r.cert_not_after > 0 ? ` · until ${new Date(r.cert_not_after * 1000).toLocaleDateString()}` : ''}`}>
                         <LockIcon sx={{ fontSize: 14, ml: 0.75, verticalAlign: 'middle', color: 'success.main' }} />
+                      </Tooltip>
+                    )}
+                    {!hasCert(r) && r.covered_by && (
+                      <Tooltip title={`HTTPS by the certificate ${r.covered_by}${r.force_ssl ? ' (forced)' : ''}`}>
+                        <LockIcon sx={{ fontSize: 14, ml: 0.75, verticalAlign: 'middle', color: 'info.main' }} />
+                      </Tooltip>
+                    )}
+                    {r.auth_usernames?.length > 0 && (
+                      <Tooltip title={`Password protected: ${r.auth_usernames.join(', ')}`}>
+                        <KeyIcon sx={{ fontSize: 14, ml: 0.75, verticalAlign: 'middle', color: 'text.secondary' }} />
                       </Tooltip>
                     )}
                   </TableCell>
                   <TableCell>
                     {r.mode === 'static' ? (
                       <Chip size="small" color="secondary" icon={<FolderIcon />} label={r.static_dir} />
+                    ) : r.mode === 'redirect' ? (
+                      <Chip size="small" color="info" icon={<CallMadeIcon />} label={`${r.redirect_code || 301} → ${r.redirect_url}`} />
                     ) : (
                       <Chip size="small" icon={<SwapHorizIcon />}
                         label={`${r.target_https ? 'https://' : ''}${r.target_ip}:${r.target_port}`} />
                     )}
                     {r.rate_limit > 0 && (
-                      <Tooltip title={`Rate limit: ${r.rate_limit} req/s per IP, violators blocked 24h`}>
+                      <Tooltip title={`Rate limit: ${r.rate_limit} req/s per IP; requests over it get 429`}>
                         <Chip size="small" variant="outlined" color="warning"
                           label={`${r.rate_limit} r/s`} sx={{ ml: 0.75 }} />
                       </Tooltip>
                     )}
                   </TableCell>
                   <TableCell align="right">
-                    {!r.managed_by && !(r.cert_file && r.key_file) && !(r.cert_not_after > 0) && (
+                    {!r.managed_by && !hasCert(r) && !r.covered_by && (
                       <Tooltip title="Get Let's Encrypt certificate">
                         <span>
                           <IconButton color="success" disabled={certBusy !== null}
@@ -362,7 +411,7 @@ export default function App() {
                     )}
                     {!r.managed_by && (<>
                     <Tooltip title="Edit">
-                      <IconButton onClick={() => setDialog({ mode: 'edit', route: { ...r } })}>
+                      <IconButton onClick={() => setDialog({ mode: 'edit', route: withAuth(r) })}>
                         <EditIcon fontSize="small" />
                       </IconButton>
                     </Tooltip>
@@ -417,8 +466,24 @@ export default function App() {
               onChange={(_, mode) => mode && setDialog((d) => ({ ...d, route: { ...d.route, mode } }))}>
               <ToggleButton value="proxy">Proxy</ToggleButton>
               <ToggleButton value="static">Static files</ToggleButton>
+              <ToggleButton value="redirect">Redirect</ToggleButton>
             </ToggleButtonGroup>
-            {(dialog?.route.mode ?? 'proxy') === 'proxy' ? (
+            {dialog?.route.mode === 'redirect' ? (
+              <>
+                <TextField label="Redirect to" placeholder="https://example.com" fullWidth
+                  helperText="The request path and query are appended unless the URL has its own path"
+                  value={dialog?.route.redirect_url ?? ''} onChange={set('redirect_url')} />
+                <FormControl fullWidth size="small">
+                  <InputLabel>Status</InputLabel>
+                  <Select label="Status" value={dialog?.route.redirect_code || 301} onChange={set('redirect_code')}>
+                    <MenuItem value={301}>301 Moved permanently</MenuItem>
+                    <MenuItem value={302}>302 Found (temporary)</MenuItem>
+                    <MenuItem value={307}>307 Temporary, keeps the method</MenuItem>
+                    <MenuItem value={308}>308 Permanent, keeps the method</MenuItem>
+                  </Select>
+                </FormControl>
+              </>
+            ) : (dialog?.route.mode ?? 'proxy') === 'proxy' ? (
               <>
                 <TextField label="Target IP" placeholder="192.168.1.10" fullWidth
                   value={dialog?.route.target_ip ?? ''} onChange={set('target_ip')} />
@@ -468,17 +533,68 @@ export default function App() {
               </>
             )}
             <TextField label="Rate limit (req/s per IP)" type="number" fullWidth
-              helperText="0 = unlimited. IPs exceeding it are blocked for 24h. Note: browsers can burst 10+ req/s loading assets"
+              helperText="0 = unlimited. Requests over the limit get 429; persistent offenders are blocked (Settings). Browsers can burst 10+ req/s loading assets"
               value={dialog?.route.rate_limit ?? 0} onChange={set('rate_limit')} />
+            <Divider>
+              <Typography variant="caption" color="text.secondary">Options</Typography>
+            </Divider>
+            <FormControlLabel
+              control={<Switch checked={!!dialog?.route.maintenance} onChange={setBool('maintenance')} />}
+              label="Maintenance page (stop forwarding requests)" />
+            {(dialog?.route.mode ?? 'proxy') === 'proxy' && (
+              <>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Backend protocol</InputLabel>
+                  <Select label="Backend protocol" value={dialog?.route.backend_protocol || 'http1'} onChange={set('backend_protocol')}>
+                    <MenuItem value="http1">HTTP/1.1 (WebSockets work)</MenuItem>
+                    <MenuItem value="h2c" disabled={!!dialog?.route.target_https}>HTTP/2 cleartext (gRPC)</MenuItem>
+                  </Select>
+                </FormControl>
+                <Box sx={{ display: 'flex', gap: 2 }}>
+                  <TextField label="Timeout (s)" type="number" sx={{ flex: 1 }}
+                    helperText="Until response headers; 0 = 60"
+                    value={dialog?.route.timeout_seconds ?? 0} onChange={set('timeout_seconds')} />
+                  <TextField label="Max body (MB)" type="number" sx={{ flex: 1 }}
+                    helperText="0 = no limit"
+                    value={dialog?.route.max_body_mb ?? 0} onChange={set('max_body_mb')} />
+                </Box>
+              </>
+            )}
+            <Typography variant="body2">Password protection (basic auth)</Typography>
+            {(dialog?.route.auth || []).map((u, i) => (
+              <Box key={i} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <TextField size="small" label="User" sx={{ flex: 1 }} value={u.user}
+                  onChange={(e) => setAuth((a) => a.map((x, j) => j === i ? { ...x, user: e.target.value } : x))} />
+                <TextField size="small" label="Password" type="password" sx={{ flex: 1 }} value={u.password}
+                  placeholder={dialog?.route.auth_usernames?.includes(u.user) ? 'unchanged' : ''}
+                  onChange={(e) => setAuth((a) => a.map((x, j) => j === i ? { ...x, password: e.target.value } : x))} />
+                <IconButton size="small" onClick={() => setAuth((a) => a.filter((_, j) => j !== i))}>
+                  <DeleteIcon fontSize="small" />
+                </IconButton>
+              </Box>
+            ))}
+            <Button size="small" startIcon={<AddIcon />} sx={{ alignSelf: 'flex-start' }}
+              onClick={() => setAuth((a) => [...(a || []), { user: '', password: '' }])}>
+              Add user
+            </Button>
             <Divider>
               <Typography variant="caption" color="text.secondary">SSL (optional)</Typography>
             </Divider>
+            {dialog?.route.covered_by && !hasCert(dialog.route) && (
+              <Typography variant="caption" color="text.secondary">
+                Served over HTTPS by the certificate {dialog.route.covered_by} (Certificates tab).
+              </Typography>
+            )}
+            <FormControlLabel
+              control={<Switch checked={!!dialog?.route.acme} onChange={setBool('acme')} />}
+              label="Let's Encrypt certificate, renewed automatically" />
+            {!dialog?.route.acme && (
             <Button variant="outlined" color="success" startIcon={<EnhancedEncryptionIcon />}
-              disabled={!dialog?.route.domain ||
-                (dialog?.route.mode === 'static' ? !dialog?.route.static_dir : !dialog?.route.target_ip)}
+              disabled={!targetReady(dialog?.route)}
               onClick={() => save(true)}>
               Save & get Let's Encrypt certificate
             </Button>
+            )}
             <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center' }}>
               — or set certificate paths manually —
             </Typography>
@@ -488,16 +604,15 @@ export default function App() {
               fullWidth value={dialog?.route.key_file ?? ''} onChange={set('key_file')} />
             <FormControlLabel
               control={<Switch checked={!!dialog?.route.force_ssl}
-                disabled={!dialog?.route.cert_file || !dialog?.route.key_file}
-                onChange={(e) => setDialog((d) => ({ ...d, route: { ...d.route, force_ssl: e.target.checked } }))} />}
+                disabled={!(dialog?.route.cert_file && dialog?.route.key_file) && !(dialog?.route.cert_not_after > 0) && !dialog?.route.covered_by}
+                onChange={setBool('force_ssl')} />}
               label="Redirect HTTP → HTTPS" />
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDialog(null)}>Cancel</Button>
           <Button variant="contained" onClick={() => save()}
-            disabled={!dialog?.route.domain ||
-              (dialog?.route.mode === 'static' ? !dialog?.route.static_dir : !dialog?.route.target_ip)}>
+            disabled={!targetReady(dialog?.route)}>
             Save
           </Button>
         </DialogActions>

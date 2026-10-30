@@ -91,3 +91,25 @@ func (t *hitTracker) note(key string, limit int) bool {
 	}
 	return false
 }
+
+// allow is a fixed-window rate limiter: up to limit hits per window and key pass, the rest are
+// rejected until the window ends.
+func (t *hitTracker) allow(key string, limit int) bool {
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.hits) > 10000 {
+		for k, h := range t.hits {
+			if now.Sub(h.start) > t.window {
+				delete(t.hits, k)
+			}
+		}
+	}
+	h := t.hits[key]
+	if h == nil || now.Sub(h.start) > t.window {
+		t.hits[key] = &hitWindow{count: 1, start: now}
+		return limit >= 1
+	}
+	h.count++
+	return h.count <= limit
+}
