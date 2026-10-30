@@ -94,7 +94,7 @@ func main() {
 	}
 	// FALLBACK_HTTP / FALLBACK_TLS are defaults; values set through PUT /api/settings win.
 	cfg, err := settings.Load(st, settings.Values{FallbackHTTP: os.Getenv("FALLBACK_HTTP"), FallbackTLS: os.Getenv("FALLBACK_TLS"),
-		ACMEEmail: os.Getenv("ACME_EMAIL")})
+		ACMEEmail: os.Getenv("ACME_EMAIL"), DNSProvider: os.Getenv("DNS_PROVIDER"), DNSAPIToken: os.Getenv("DNS_API_TOKEN")})
 	if err != nil {
 		log.Fatalf("settings: %v", err)
 	}
@@ -129,7 +129,17 @@ func main() {
 	var issuer *acme.Issuer
 	if email := cfg.Get().ACMEEmail; email != "" || os.Getenv("ACME") == "true" {
 		issuer = acme.New(st, email, os.Getenv("ACME_DIRECTORY"))
-		cfg.OnChange(func(v settings.Values) { issuer.SetEmail(v.ACMEEmail) })
+		if v := cfg.Get(); v.DNSProvider != "" {
+			if err := issuer.SetDNS(v.DNSProvider, v.DNSAPIToken); err != nil {
+				log.Printf("acme: dns provider: %v", err)
+			}
+		}
+		cfg.OnChange(func(v settings.Values) {
+			issuer.SetEmail(v.ACMEEmail)
+			if err := issuer.SetDNS(v.DNSProvider, v.DNSAPIToken); err != nil {
+				log.Printf("acme: dns provider: %v", err)
+			}
+		})
 		go issuer.RunRenewals(context.Background(), 12*time.Hour)
 		log.Printf("acme: built-in Let's Encrypt client enabled (%s)", env("ACME_DIRECTORY", acme.LetsEncrypt))
 	}
@@ -182,7 +192,7 @@ func main() {
 		if target == "" {
 			return ""
 		}
-		if _, ok := st.CertRoute(strings.ToLower(sni)); ok {
+		if st.HasTLS(strings.ToLower(sni)) {
 			return ""
 		}
 		rec.RecordFallback(sni, metrics.FallbackKindTLS)

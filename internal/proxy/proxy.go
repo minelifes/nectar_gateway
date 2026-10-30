@@ -418,7 +418,12 @@ func (h *Handler) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 	domain := strings.ToLower(hello.ServerName)
 	route, ok := h.store.CertRoute(domain)
 	if !ok {
-		return nil, fmt.Errorf("no certificate for %q", domain)
+		// no certificate on the host's routes: a standalone (e.g. wildcard) certificate that covers it
+		sc, ok := h.store.CoveringCertificate(domain)
+		if !ok {
+			return nil, fmt.Errorf("no certificate for %q", domain)
+		}
+		return h.standaloneCert(sc)
 	}
 
 	h.certMu.Lock()
@@ -454,6 +459,27 @@ func (h *Handler) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 		modTime = info.ModTime()
 	}
 	h.certs[domain] = &cachedCert{cert: &cert, certPath: route.CertFile, loadedAt: time.Now(), modTime: modTime}
+	return &cert, nil
+}
+
+// standaloneCert parses a standalone certificate once per version (cached by id and update time).
+func (h *Handler) standaloneCert(sc store.Certificate) (*tls.Certificate, error) {
+	key := fmt.Sprintf("cert:%d:%d", sc.ID, sc.UpdatedAt)
+	h.certMu.Lock()
+	defer h.certMu.Unlock()
+	if c := h.certs[key]; c != nil {
+		return c.cert, nil
+	}
+	cert, err := tls.X509KeyPair([]byte(sc.CertPEM), []byte(sc.KeyPEM))
+	if err != nil {
+		return nil, fmt.Errorf("certificate %s: %w", sc.Domain, err)
+	}
+	for k := range h.certs { // drop older versions of this certificate
+		if strings.HasPrefix(k, fmt.Sprintf("cert:%d:", sc.ID)) {
+			delete(h.certs, k)
+		}
+	}
+	h.certs[key] = &cachedCert{cert: &cert, certPath: key, loadedAt: time.Now()}
 	return &cert, nil
 }
 

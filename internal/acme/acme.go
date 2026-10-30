@@ -1,6 +1,7 @@
-// Package acme is the gateway's built-in Let's Encrypt client (HTTP-01 challenge). It replaces
-// shelling out to certbot inside containers: certificates and the account key live in the
-// gateway database, challenges are answered by the proxy itself, and renewal runs in-process.
+// Package acme is the gateway's built-in Let's Encrypt client. It replaces shelling out to certbot
+// inside containers: certificates and the account key live in the gateway database, HTTP-01
+// challenges are answered by the proxy itself, DNS-01 challenges (wildcard certificates) through a
+// DNS provider's API, and renewal runs in-process.
 package acme
 
 import (
@@ -42,7 +43,12 @@ type Issuer struct {
 	client *xacme.Client
 	tokens sync.Map // HTTP-01 token → key authorization
 
-	inflight sync.Map // domain → struct{} (one order per domain at a time)
+	inflight sync.Map // names → struct{} (one order per name set at a time)
+
+	dns       DNSProvider // nil = no DNS-01 (no wildcard certificates)
+	lookup    TXTLookup   // propagation check (default: public resolvers)
+	propagate time.Duration
+	kick      chan struct{} // renew soon (after a DNS settings change)
 }
 
 // New creates an issuer. directory "" = Let's Encrypt production.
@@ -50,7 +56,43 @@ func New(st *store.Store, email, directory string) *Issuer {
 	if directory == "" {
 		directory = LetsEncrypt
 	}
-	return &Issuer{store: st, email: email, directory: directory}
+	return &Issuer{store: st, email: email, directory: directory, lookup: PublicTXT(), propagate: 2 * time.Minute, kick: make(chan struct{}, 1)}
+}
+
+// SetDNS sets the DNS-01 provider ("" removes it). Certificates that failed are retried soon.
+func (i *Issuer) SetDNS(kind, token string) error {
+	p, err := NewDNSProvider(kind, token)
+	if err != nil {
+		return err
+	}
+	i.mu.Lock()
+	i.dns = p
+	i.mu.Unlock()
+	select {
+	case i.kick <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// SetDNSProvider sets the provider and the propagation check directly (tests, other providers).
+func (i *Issuer) SetDNSProvider(p DNSProvider, lookup TXTLookup, wait time.Duration) {
+	i.mu.Lock()
+	i.dns, i.lookup, i.propagate = p, lookup, wait
+	i.mu.Unlock()
+}
+
+// HasDNS reports whether DNS-01 (wildcard certificates) is available.
+func (i *Issuer) HasDNS() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.dns != nil
+}
+
+func (i *Issuer) dnsConfig() (DNSProvider, TXTLookup, time.Duration) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.dns, i.lookup, i.propagate
 }
 
 // SetEmail changes the account contact. An already registered account is updated at Let's Encrypt
@@ -148,25 +190,50 @@ func (i *Issuer) accountKey() (crypto.Signer, error) {
 	return key, nil
 }
 
-// Issue obtains a certificate for domain via HTTP-01. The domain must already point to this gateway.
+// Issue obtains a certificate for one domain: HTTP-01 (the domain must point to this gateway), or
+// DNS-01 for a wildcard (needs a DNS provider).
 func (i *Issuer) Issue(ctx context.Context, domain string) (certPEM, keyPEM string, err error) {
-	domain = strings.ToLower(strings.TrimSpace(domain))
-	if strings.HasPrefix(domain, "*.") {
-		return "", "", errors.New("wildcard certificates need the DNS-01 challenge (not supported yet)")
+	return i.IssueNames(ctx, []string{domain})
+}
+
+// ErrNoDNS: a wildcard certificate needs DNS-01, which needs a DNS provider.
+var ErrNoDNS = errors.New("wildcard certificates need the DNS-01 challenge: set a DNS provider (dns_provider, dns_api_token in the settings)")
+
+// IssueNames obtains one certificate for all names. Orders with a wildcard are validated over DNS-01
+// for every name (Let's Encrypt allows only DNS-01 for wildcards); others over HTTP-01.
+func (i *Issuer) IssueNames(ctx context.Context, names []string) (certPEM, keyPEM string, err error) {
+	if len(names) == 0 {
+		return "", "", errors.New("no names")
 	}
-	if _, busy := i.inflight.LoadOrStore(domain, struct{}{}); busy {
+	wildcard := false
+	for k, n := range names {
+		names[k] = strings.ToLower(strings.TrimSpace(n))
+		wildcard = wildcard || strings.HasPrefix(names[k], "*.")
+	}
+	dns, lookup, wait := i.dnsConfig()
+	if wildcard && dns == nil {
+		return "", "", ErrNoDNS
+	}
+	key := strings.Join(names, ",")
+	if _, busy := i.inflight.LoadOrStore(key, struct{}{}); busy {
 		return "", "", errors.New("a certificate request for this domain is already running")
 	}
-	defer i.inflight.Delete(domain)
+	defer i.inflight.Delete(key)
 
 	c, err := i.clientFor(ctx)
 	if err != nil {
 		return "", "", err
 	}
-	order, err := c.AuthorizeOrder(ctx, xacme.DomainIDs(domain))
+	order, err := c.AuthorizeOrder(ctx, xacme.DomainIDs(names...))
 	if err != nil {
 		return "", "", fmt.Errorf("acme order: %w", err)
 	}
+	var cleanups []func()
+	defer func() {
+		for _, f := range cleanups {
+			f()
+		}
+	}()
 	for _, zurl := range order.AuthzURLs {
 		z, err := c.GetAuthorization(ctx, zurl)
 		if err != nil {
@@ -175,39 +242,68 @@ func (i *Issuer) Issue(ctx context.Context, domain string) (certPEM, keyPEM stri
 		if z.Status == xacme.StatusValid {
 			continue
 		}
+		typ := "http-01"
+		if wildcard {
+			typ = "dns-01"
+		}
 		var chal *xacme.Challenge
 		for _, ch := range z.Challenges {
-			if ch.Type == "http-01" {
+			if ch.Type == typ {
 				chal = ch
 				break
 			}
 		}
 		if chal == nil {
-			return "", "", errors.New("acme: the CA offered no http-01 challenge")
+			return "", "", fmt.Errorf("acme: the CA offered no %s challenge for %s", typ, z.Identifier.Value)
 		}
-		resp, err := c.HTTP01ChallengeResponse(chal.Token)
-		if err != nil {
-			return "", "", err
+		host := strings.TrimPrefix(z.Identifier.Value, "*.")
+		if typ == "dns-01" {
+			rec, err := c.DNS01ChallengeRecord(chal.Token)
+			if err != nil {
+				return "", "", err
+			}
+			fqdn := "_acme-challenge." + host
+			if err := dns.Present(ctx, fqdn, rec); err != nil {
+				return "", "", fmt.Errorf("dns-01 for %s: %w", z.Identifier.Value, err)
+			}
+			cleanups = append(cleanups, func() {
+				cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := dns.CleanUp(cctx, fqdn, rec); err != nil {
+					log.Printf("acme: remove TXT %s: %v", fqdn, err)
+				}
+			})
+			if !waitTXT(ctx, lookup, fqdn, rec, wait, 5*time.Second) {
+				log.Printf("acme: TXT %s not visible yet after %s, asking the CA anyway", fqdn, wait)
+			}
+		} else {
+			resp, err := c.HTTP01ChallengeResponse(chal.Token)
+			if err != nil {
+				return "", "", err
+			}
+			i.tokens.Store(chal.Token, resp)
+			defer i.tokens.Delete(chal.Token)
 		}
-		i.tokens.Store(chal.Token, resp)
-		defer i.tokens.Delete(chal.Token)
 		if _, err := c.Accept(ctx, chal); err != nil {
 			return "", "", fmt.Errorf("acme accept: %w", err)
 		}
 		if _, err := c.WaitAuthorization(ctx, z.URI); err != nil {
-			return "", "", fmt.Errorf("acme validation for %s failed (does the domain point to this server and is port 80 open?): %w", domain, err)
+			if typ == "dns-01" {
+				return "", "", fmt.Errorf("acme dns-01 validation for %s failed (is the TXT record _acme-challenge.%s visible?): %w", z.Identifier.Value, host, err)
+			}
+			return "", "", fmt.Errorf("acme validation for %s failed (does the domain point to this server and is port 80 open?): %w", z.Identifier.Value, err)
 		}
 	}
 	if order, err = c.WaitOrder(ctx, order.URI); err != nil {
 		return "", "", fmt.Errorf("acme order: %w", err)
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key2, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return "", "", err
 	}
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: domain}, DNSNames: []string{domain},
-	}, key)
+		Subject: pkix.Name{CommonName: names[0]}, DNSNames: names,
+	}, key2)
 	if err != nil {
 		return "", "", err
 	}
@@ -219,15 +315,34 @@ func (i *Issuer) Issue(ctx context.Context, domain string) (certPEM, keyPEM stri
 	for _, der := range chain {
 		_ = pem.Encode(&b, &pem.Block{Type: "CERTIFICATE", Bytes: der})
 	}
-	kder, err := x509.MarshalECPrivateKey(key)
+	kder, err := x509.MarshalECPrivateKey(key2)
 	if err != nil {
 		return "", "", err
 	}
 	return b.String(), string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder})), nil
 }
 
-// RunRenewals renews ACME certificates that expire within 30 days and issues missing ones for routes
-// with acme=true. It runs until ctx is cancelled.
+// IssueCertificate issues (or renews) a standalone certificate and records the result.
+func (i *Issuer) IssueCertificate(ctx context.Context, id int64) error {
+	c, ok := i.store.Certificate(id)
+	if !ok {
+		return errors.New("certificate not found")
+	}
+	certPEM, keyPEM, err := i.IssueNames(ctx, c.Names())
+	if err != nil {
+		_ = i.store.SetCertificateError(id, err.Error())
+		return err
+	}
+	if _, err := i.store.SetCertificatePair(id, certPEM, keyPEM, "acme"); err != nil {
+		_ = i.store.SetCertificateError(id, err.Error())
+		return err
+	}
+	log.Printf("acme: certificate for %s issued/renewed", strings.Join(c.Names(), ", "))
+	return nil
+}
+
+// RunRenewals renews ACME certificates that expire within 30 days and issues missing ones (routes with
+// acme=true and standalone certificates). It runs until ctx is cancelled.
 func (i *Issuer) RunRenewals(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -237,25 +352,51 @@ func (i *Issuer) RunRenewals(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-i.kick:
 		}
 	}
 }
 
+// retryAfter spaces out failed attempts (Let's Encrypt limits failed validations per hour).
+const retryAfter = time.Hour
+
 func (i *Issuer) renewOnce(ctx context.Context) {
+	now := time.Now()
+	// standalone certificates first: they may cover the routes below
+	for _, c := range i.store.Certificates() {
+		if !c.ACME || c.NotAfter > now.Add(renewBefore).Unix() {
+			continue
+		}
+		if c.LastError != "" && now.Sub(time.Unix(c.LastAttempt, 0)) < retryAfter {
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+		if err := i.IssueCertificate(cctx, c.ID); err != nil {
+			log.Printf("acme: %s: %v", c.Domain, err)
+		}
+		cancel()
+	}
 	done := map[string]bool{}
 	for _, r := range i.store.All() {
-		if done[r.Domain] || strings.HasPrefix(r.Domain, "*.") {
+		if done[r.Domain] {
 			continue
 		}
 		wants := r.ACME || r.CertSource == "acme"
 		if !wants || r.CertSource == "upload" || r.CertSource == "file" {
 			continue
 		}
-		if r.CertNotAfter > time.Now().Add(renewBefore).Unix() {
+		if r.CertNotAfter > now.Add(renewBefore).Unix() {
+			continue
+		}
+		if strings.HasPrefix(r.Domain, "*.") && !i.HasDNS() {
+			continue
+		}
+		// a wildcard certificate already serves this host: no order of its own (rate limits, port 80)
+		if cov, ok := i.store.CoveringCertificate(r.Domain); ok && cov.NotAfter > now.Add(renewBefore).Unix() && r.CertNotAfter == 0 {
 			continue
 		}
 		done[r.Domain] = true
-		cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		cctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 		certPEM, keyPEM, err := i.Issue(cctx, r.Domain)
 		cancel()
 		if err != nil {

@@ -116,6 +116,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/access-log", s.requireAuth(s.getAccessLog))
 	mux.HandleFunc("GET /api/settings", s.requireAuth(s.getSettings))
 	mux.HandleFunc("PUT /api/settings", s.requireAuth(s.putSettings))
+	mux.HandleFunc("GET /api/certificates", s.requireAuth(s.listCertificates))
+	mux.HandleFunc("POST /api/certificates", s.requireAuth(s.createCertificate))
+	mux.HandleFunc("PUT /api/certificates/{id}", s.requireAuth(s.uploadCertificatePair))
+	mux.HandleFunc("POST /api/certificates/{id}/renew", s.requireAuth(s.renewCertificate))
+	mux.HandleFunc("DELETE /api/certificates/{id}", s.requireAuth(s.deleteCertificate))
 
 	// unauthenticated: probes and version discovery
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
@@ -127,7 +132,7 @@ func (s *Server) Handler() http.Handler {
 		w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"version": s.version, "api_version": APIVersion, "headless": s.ui == nil})
+		writeJSON(w, http.StatusOK, map[string]any{"version": s.version, "api_version": APIVersion, "headless": s.ui == nil, "features": s.features()})
 	})
 
 	if s.ui != nil {
@@ -275,6 +280,18 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 
 // ---- routes CRUD ----
 
+// Features lists optional API parts, so controllers can tell what this gateway build supports.
+func (s *Server) features() []string {
+	f := []string{"certificates"} // standalone / wildcard certificates (/api/certificates)
+	if ci := s.certIssuer(); ci != nil {
+		f = append(f, "acme")
+		if ci.HasDNS() {
+			f = append(f, "dns-01")
+		}
+	}
+	return f
+}
+
 func (s *Server) listRoutes(w http.ResponseWriter, r *http.Request) {
 	var f store.Filter
 	if q := r.URL.Query(); q.Has("managed_by") {
@@ -287,7 +304,7 @@ func (s *Server) listRoutes(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, routes)
+	writeJSON(w, http.StatusOK, s.store.WithCoverage(routes))
 }
 
 func (s *Server) createRoute(w http.ResponseWriter, r *http.Request) {
@@ -554,10 +571,17 @@ func (s *Server) deleteCert(w http.ResponseWriter, r *http.Request) {
 
 // autoIssue starts a background certificate request for routes with acme=true and no valid cert.
 func (s *Server) autoIssue(rt store.Route) {
-	if s.issuer == nil || !rt.ACME || strings.HasPrefix(rt.Domain, "*.") {
+	if s.issuer == nil || !rt.ACME {
+		return
+	}
+	if ci := s.certIssuer(); strings.HasPrefix(rt.Domain, "*.") && (ci == nil || !ci.HasDNS()) {
 		return
 	}
 	if existing, ok := s.store.CertRoute(rt.Domain); ok && existing.CertNotAfter > time.Now().Add(30*24*time.Hour).Unix() {
+		return
+	}
+	// a wildcard (or exact) certificate already serves the host: no order of its own
+	if c, ok := s.store.CoveringCertificate(rt.Domain); ok && c.NotAfter > time.Now().Add(30*24*time.Hour).Unix() {
 		return
 	}
 	go func() {
@@ -613,7 +637,7 @@ func (s *Server) getAccessLog(w http.ResponseWriter, r *http.Request) {
 // ---- runtime settings (G10 fallback) ----
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.settings.Get())
+	writeJSON(w, http.StatusOK, s.settings.Get().Public())
 }
 
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
@@ -621,7 +645,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "settings are not available"})
 		return
 	}
-	v := s.settings.Get()
+	v := s.settings.Get() // fields left out keep their value; dns_api_token is write-only
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&v); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -630,6 +654,6 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	log.Printf("settings: fallback_http=%q fallback_tls=%q acme_email=%q", v.FallbackHTTP, v.FallbackTLS, v.ACMEEmail)
-	writeJSON(w, http.StatusOK, s.settings.Get())
+	log.Printf("settings: fallback_http=%q fallback_tls=%q acme_email=%q dns_provider=%q", v.FallbackHTTP, v.FallbackTLS, v.ACMEEmail, v.DNSProvider)
+	writeJSON(w, http.StatusOK, s.settings.Get().Public())
 }

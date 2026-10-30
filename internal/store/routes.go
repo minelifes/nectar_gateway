@@ -73,6 +73,10 @@ type Route struct {
 	// "" = no basic auth) so controllers can detect drift without seeing the hashes.
 	AuthFingerprint string `json:"auth_fingerprint,omitempty"`
 	UpdatedAt       int64  `json:"updated_at"`
+	// CoveredBy / CoveredUntil (read-only, API responses only): the standalone certificate (e.g. a
+	// wildcard) that serves this host because the route has no certificate of its own.
+	CoveredBy    string `json:"covered_by,omitempty"`
+	CoveredUntil int64  `json:"covered_until,omitempty"`
 }
 
 // AuthUser is a basic-auth user in API requests. An empty password keeps the user's current password.
@@ -176,6 +180,19 @@ func (s *Store) KnownHost(host string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.table.hostRoutes(strings.ToLower(host))) > 0
+}
+
+// WithCoverage fills CoveredBy/CoveredUntil of routes without a certificate of their own.
+func (s *Store) WithCoverage(routes []Route) []Route {
+	for i := range routes {
+		if routes[i].HasSSL() {
+			continue
+		}
+		if c, ok := s.CoveringCertificate(routes[i].Domain); ok {
+			routes[i].CoveredBy, routes[i].CoveredUntil = c.Domain, c.NotAfter
+		}
+	}
+	return routes
 }
 
 // CertRoute returns a route of the host that has a certificate (TLS works per host, not per path).
@@ -369,16 +386,30 @@ func normalize(r *Route) error {
 		r.CertSource = "file"
 	}
 	if r.ForceSSL && !r.HasSSL() && !r.ACME {
-		return errors.New("force_ssl requires a certificate (cert files, an uploaded certificate or acme)")
+		return errNeedCert
 	}
 	return nil
+}
+
+// errNeedCert: force_ssl without a certificate. Create/Update accept it when a standalone certificate
+// (e.g. a wildcard) covers the host.
+var errNeedCert = errors.New("force_ssl requires a certificate (cert files, an uploaded certificate, acme or a covering wildcard certificate)")
+
+func (s *Store) normalizeRoute(r *Route) error {
+	err := normalize(r)
+	if errors.Is(err, errNeedCert) {
+		if _, ok := s.CoveringCertificate(r.Domain); ok {
+			return nil
+		}
+	}
+	return err
 }
 
 func isUnique(err error) bool { return err != nil && strings.Contains(err.Error(), "UNIQUE") }
 
 // Create inserts a route.
 func (s *Store) Create(r *Route) error {
-	if err := normalize(r); err != nil {
+	if err := s.normalizeRoute(r); err != nil {
 		return err
 	}
 	r.UpdatedAt = time.Now().Unix()
@@ -415,7 +446,7 @@ func (s *Store) Update(r *Route) error {
 			r.CertSource, r.CertNotAfter = old.CertSource, old.CertNotAfter
 		}
 	}
-	if err := normalize(r); err != nil {
+	if err := s.normalizeRoute(r); err != nil {
 		return err
 	}
 	r.UpdatedAt = time.Now().Unix()

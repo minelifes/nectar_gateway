@@ -84,9 +84,10 @@ Push setup (ntfy, free): install the ntfy app ([Android](https://play.google.com
 - **Metrics & access log:** `GET /api/metrics?minutes=60&domain=&series=1` — per-domain requests, RPS, status classes, bytes, p50/p95/p99 latency, per-minute series (in memory, last 60 minutes). `GET /api/access-log?domain=&status=5xx&ip=&limit=` — the last `ACCESS_LOG_SIZE` (2000) requests, newest first.
 - **Fallback & TLS passthrough (migrations):** `PUT /api/settings {fallback_http, fallback_tls}` (`host:port`). Requests for hosts without a route go to `fallback_http` instead of 410; HTTPS connections whose host has no certificate here are forwarded untouched (SNI passthrough) to `fallback_tls`, so a previous proxy keeps serving its own certificates. `FALLBACK_HTTP` / `FALLBACK_TLS` env vars are the defaults.
 - **Let's Encrypt email at runtime:** `PUT /api/settings {"acme_email": "ops@example.com"}` sets the ACME account contact (default: `ACME_EMAIL`); a registered account is updated at Let's Encrypt. The built-in issuer runs when `ACME=true` or an email is set.
+- **Wildcard certificates (DNS-01):** set a DNS provider once — `PUT /api/settings {"dns_provider": "cloudflare", "dns_api_token": "…"}` (a Cloudflare API token with Zone:Read and DNS:Edit; the token is write-only, `GET` shows `dns_token_set`). Then `POST /api/certificates {"domain": "*.apps.example.com", "include_apex": true}` orders a certificate over DNS-01 in the background. `GET /api/certificates` shows each certificate's `status` (pending, valid, expiring, expired, failed), `last_error` and the hosts it `serves`; `POST /api/certificates/{id}/renew` retries, `PUT /api/certificates/{id} {cert_pem, key_pem}` uploads a pair, `DELETE` removes it. A host whose routes have no certificate of their own is served by the covering certificate (exact before wildcard; `*.x` covers one label), routes show it as `covered_by` / `covered_until`, and no HTTP-01 order is made for covered hosts. Routes for `*.example.com` with `acme: true` also use DNS-01. `features` in `GET /api/version` lists `certificates`, `acme` and `dns-01`.
 - **Fallback hits:** `GET /api/fallback-hits` lists every host that reached the fallback upstream (HTTP and TLS counts, first and last seen). The counters survive restarts; `DELETE /api/fallback-hits` resets them. The panel uses them to decide when the old proxy can be removed.
 - **Block an IP by hand:** `POST /api/blocked {ip, reason, ttl_seconds}` (no TTL = permanent; used when importing a standalone gateway's block list).
-- `GET /api/version` → `{version, api_version, headless}`, `GET /healthz`, `GET /readyz` (no auth). The proxy answers `/__nectar/canary` with `200 ok` for any host (update health checks).
+- `GET /api/version` → `{version, api_version, headless, features}`, `GET /healthz`, `GET /readyz` (no auth). The proxy answers `/__nectar/canary` with `200 ok` for any host (update health checks).
 
 ### Service token & headless mode
 
@@ -95,6 +96,7 @@ Push setup (ntfy, free): install the ntfy app ([Android](https://play.google.com
 | `GATEWAY_API_TOKEN` | — | bearer token for controllers such as [nectar_apps](https://github.com/minelifes/nectar_apps) (min. 24 chars) |
 | `ADMIN_UI` | `true` | `false` = headless: no admin UI, API only; password login is off unless `ADMIN_USER`/`ADMIN_PASS` are set explicitly |
 | `ACME_EMAIL` | — | enables the built-in Let's Encrypt client (HTTP-01, certificates stored in the database, renewed 30 days before expiry) |
+| `DNS_PROVIDER` / `DNS_API_TOKEN` | — | default DNS-01 provider (`cloudflare`) and its token for wildcard certificates; `PUT /api/settings` overrides |
 | `ACME_DIRECTORY` | Let's Encrypt | e.g. `https://acme-staging-v02.api.letsencrypt.org/directory` for testing |
 | `FALLBACK_HTTP` / `FALLBACK_TLS` | — | default fallback upstream / SNI passthrough target (`host:port`); `PUT /api/settings` overrides |
 | `ACCESS_LOG_SIZE` | `2000` | access-log entries kept in memory |

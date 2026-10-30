@@ -37,10 +37,11 @@ type Store struct {
 	mu      sync.RWMutex
 	table   routeTable           // host → routes (longest path prefix first)
 	blocked map[string]BlockedIP // ip -> block
+	certs   map[int64]Certificate
 }
 
 // schemaVersion is stored in PRAGMA user_version.
-const schemaVersion = 3
+const schemaVersion = 4 // v4: standalone (wildcard) certificates
 
 func New(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -56,6 +57,9 @@ func New(path string) (*Store, error) {
 		return nil, err
 	}
 	if err := s.loadBlocked(); err != nil {
+		return nil, err
+	}
+	if err := s.reloadCerts(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -174,6 +178,7 @@ func migrate(db *sql.DB) error {
 			expires_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value BLOB NOT NULL)`, // e.g. the ACME account key
+		certificatesTable,
 		fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion),
 	} {
 		if _, err := tx.Exec(stmt); err != nil {

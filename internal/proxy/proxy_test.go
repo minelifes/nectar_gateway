@@ -191,3 +191,33 @@ func TestCertificateFromDatabase(t *testing.T) {
 		t.Fatal("certificate for an unknown host")
 	}
 }
+
+// A host without a certificate of its own is served by a covering wildcard certificate.
+func TestWildcardCertificate(t *testing.T) {
+	st, err := store.New(filepath.Join(t.TempDir(), "gw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, "")
+	r := store.Route{Domain: "api.apps.example.com", TargetIP: "x"}
+	st.Create(&r)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(8), Subject: pkix.Name{CommonName: "*.apps.example.com"},
+		DNSNames: []string{"*.apps.example.com"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	kder, _ := x509.MarshalECPrivateKey(key)
+	c := store.Certificate{Domain: "*.apps.example.com", CertPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		KeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kder}))}
+	if err := st.CreateCertificate(&c); err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"api.apps.example.com", "new.apps.example.com"} {
+		cert, err := h.GetCertificate(&tls.ClientHelloInfo{ServerName: host})
+		if err != nil || cert == nil {
+			t.Fatalf("%s: %v", host, err)
+		}
+	}
+	if _, err := h.GetCertificate(&tls.ClientHelloInfo{ServerName: "deep.api.apps.example.com"}); err == nil {
+		t.Fatal("a wildcard covers one label only")
+	}
+}

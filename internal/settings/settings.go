@@ -22,6 +22,27 @@ type Values struct {
 	FallbackTLS string `json:"fallback_tls"`
 	// ACMEEmail is the Let's Encrypt account contact ("" = no contact). Defaults to ACME_EMAIL.
 	ACMEEmail string `json:"acme_email"`
+	// DNSProvider answers ACME DNS-01 challenges (needed for wildcard certificates): "" | "cloudflare".
+	DNSProvider string `json:"dns_provider"`
+	// DNSAPIToken is the provider credential (Cloudflare: an API token with Zone:Read and DNS:Edit).
+	// Write-only: the admin API never returns it (see Public).
+	DNSAPIToken string `json:"dns_api_token,omitempty"`
+}
+
+// DNSProviders are the supported DNS-01 providers.
+var DNSProviders = []string{"cloudflare"}
+
+// PublicValues is what the admin API returns: the values without secrets.
+type PublicValues struct {
+	Values
+	DNSTokenSet bool `json:"dns_token_set"`
+}
+
+// Public hides the DNS token.
+func (v Values) Public() PublicValues {
+	p := PublicValues{Values: v, DNSTokenSet: v.DNSAPIToken != ""}
+	p.DNSAPIToken = ""
+	return p
 }
 
 // KV is the storage (implemented by store.Store).
@@ -88,6 +109,10 @@ func (s *Settings) Get() Values {
 func (s *Settings) Set(v Values) error {
 	v.FallbackHTTP, v.FallbackTLS = strings.TrimSpace(v.FallbackHTTP), strings.TrimSpace(v.FallbackTLS)
 	v.ACMEEmail = strings.TrimSpace(v.ACMEEmail)
+	v.DNSProvider, v.DNSAPIToken = strings.ToLower(strings.TrimSpace(v.DNSProvider)), strings.TrimSpace(v.DNSAPIToken)
+	if v.DNSProvider == "" {
+		v.DNSAPIToken = ""
+	}
 	if err := v.Validate(); err != nil {
 		return err
 	}
@@ -111,6 +136,18 @@ var emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 func (v Values) Validate() error {
 	if v.ACMEEmail != "" && !emailRe.MatchString(v.ACMEEmail) {
 		return errors.New("acme_email must be an email address")
+	}
+	if v.DNSProvider != "" {
+		known := false
+		for _, p := range DNSProviders {
+			known = known || p == v.DNSProvider
+		}
+		if !known {
+			return fmt.Errorf("dns_provider must be one of %s (or empty)", strings.Join(DNSProviders, ", "))
+		}
+		if v.DNSAPIToken == "" {
+			return errors.New("dns_api_token is required for the DNS provider")
+		}
 	}
 	for name, hp := range map[string]string{"fallback_http": v.FallbackHTTP, "fallback_tls": v.FallbackTLS} {
 		if hp == "" {
