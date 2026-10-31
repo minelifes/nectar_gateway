@@ -4,12 +4,20 @@
 #   release.json attached to the GitHub release (read by the nectar-apps updater)
 #   updates.json on the gh-pages branch (the update feed, no GitHub API rate limits)
 # Beta releases: push a tag like v1.3.0-beta.1 by hand.
+# Release without a release PR: label a pull request "release" (or release:major / release:minor /
+# release:patch) and merge it into main. The next version is computed from the conventional commits since the
+# latest tag (feat → minor, fix → patch, feat! → major; the label forces the bump), the merge commit is tagged
+# and published as above — nothing is committed (no CHANGELOG or manifest change). release-please then pauses
+# while a tag is newer than .release-please-manifest.json (its PR would propose a version that exists).
 name: Release
 
 on:
   push:
     branches: [main]
     tags: ["v*-*"]          # manual pre-release tags (beta/rc); stable tags come from release-please
+  pull_request:
+    types: [closed]         # a merged pull request labelled "release" is released right away
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -27,27 +35,73 @@ env:
 
 jobs:
   release-please:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       created: ${{ steps.rp.outputs.release_created }}
       tag: ${{ steps.rp.outputs.tag_name }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Paused after a labelled release?
+        id: guard
+        run: echo "ahead=$(python3 scripts/release_meta.py tag-ahead)" >> "$GITHUB_OUTPUT"
       - id: rp
+        if: steps.guard.outputs.ahead != 'true'
         uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  # a merged pull request labelled release / release:major|minor|patch: tag the merge commit right away
+  label-release:
+    if: >-
+      github.event_name == 'pull_request' && github.event.pull_request.merged &&
+      (contains(github.event.pull_request.labels.*.name, 'release') ||
+       contains(github.event.pull_request.labels.*.name, 'release:major') ||
+       contains(github.event.pull_request.labels.*.name, 'release:minor') ||
+       contains(github.event.pull_request.labels.*.name, 'release:patch'))
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+      - name: Next version and tag
+        id: tag
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }} # via env: a title is untrusted input, never inline it in the script
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUMP=auto
+          for l in $LABELS; do case "$l" in release:major|release:minor|release:patch) BUMP="${l#release:}" ;; esac; done
+          VERSION=$(python3 scripts/release_meta.py next-version --bump "$BUMP")
+          TAG="v$VERSION"
+          echo "Releasing $TAG (bump: $BUMP) from #$PR"
+          git config user.name "nectar-release-bot"
+          git config user.email "support@techbrain.llc"
+          git tag -a "$TAG" -m "$TAG (#$PR $TITLE)"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # an open release-please PR now proposes a version that exists: close it
+          for pr in $(gh pr list --label "autorelease: pending" --state open --json number --jq '.[].number'); do
+            gh pr close "$pr" --comment "Released $TAG from #$PR (label \"release\"). release-please pauses until .release-please-manifest.json is at $VERSION or newer." || true
+          done
+
   publish:
-    needs: [release-please]
-    if: always() && (needs.release-please.outputs.created == 'true' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    needs: [release-please, label-release]
+    if: always() && (needs.release-please.outputs.created == 'true' || needs.label-release.outputs.tag != '' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - name: Resolve tag
         id: tag
         run: |
-          TAG="${{ needs.release-please.outputs.tag || inputs.tag || github.ref_name }}"
+          TAG="${{ needs.release-please.outputs.tag || needs.label-release.outputs.tag || inputs.tag || github.ref_name }}"
           # accept vX.Y.Z and component-prefixed tags (nectar-gateway-vX.Y.Z)
           VERSION=$(printf '%s' "$TAG" | sed -E 's/^(.*-)?v([0-9]+\.[0-9]+\.[0-9]+)/\2/')
           printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "::error::not a release tag: $TAG"; exit 1; }
