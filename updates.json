@@ -5,6 +5,25 @@
       "stable": [
         {
           "component": "gateway",
+          "version": "1.2.5",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:1fa4d83b47fc1ef8123591bd5951075ca2ba7682abf8c16e8ccb76f3e46e54ae",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": false,
+          "notes": "- Features P2. Replicas. Fix certificates. Certificates for replicas.",
+          "previous": "1.2.4",
+          "published_at": "2026-10-31T14:47:04+00:00"
+        },
+        {
+          "component": "gateway",
           "version": "1.2.4",
           "channel": "stable",
           "image": "ghcr.io/minelifes/nectar-gateway@sha256:13c6c22712b4bac9b6d79d64b561ba77c2a1b080a74e2763d3a7d039578bc956",
@@ -100,6 +119,25 @@
         }
       ],
       "beta": [
+        {
+          "component": "gateway",
+          "version": "1.2.5",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:1fa4d83b47fc1ef8123591bd5951075ca2ba7682abf8c16e8ccb76f3e46e54ae",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": false,
+          "notes": "- Features P2. Replicas. Fix certificates. Certificates for replicas.",
+          "previous": "1.2.4",
+          "published_at": "2026-10-31T14:47:04+00:00"
+        },
         {
           "component": "gateway",
           "version": "1.2.4",
@@ -198,5 +236,5 @@
       ]
     }
   },
-  "updated_at": "2026-10-30T22:08:02+00:00"
+  "updated_at": "2026-10-31T14:47:04+00:00"
 }
