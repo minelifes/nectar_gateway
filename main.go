@@ -26,6 +26,7 @@ import (
 	"nectar_gateway/internal/metrics"
 	"nectar_gateway/internal/passthrough"
 	"nectar_gateway/internal/proxy"
+	"nectar_gateway/internal/replica"
 	"nectar_gateway/internal/settings"
 	"nectar_gateway/internal/store"
 )
@@ -127,8 +128,21 @@ func main() {
 
 	// Built-in Let's Encrypt (replaces certbot) when ACME=true or an ACME email is set (env ACME_EMAIL or
 	// PUT /api/settings acme_email). The email can change at runtime.
+	// Edge replica: PRIMARY_URL is the admin URL of the primary gateway. A replica copies the primary's
+	// routes, certificates, blocks and settings and never issues certificates itself.
+	primaryURL := strings.TrimSpace(os.Getenv("PRIMARY_URL"))
+	var follower *replica.Follower
+	if primaryURL != "" {
+		follower = &replica.Follower{Primary: primaryURL, Token: os.Getenv("GATEWAY_API_TOKEN"), Node: env("NODE_NAME", hostname()),
+			Version: version, Store: st, Settings: cfg}
+		if follower.Token == "" {
+			log.Fatalf("PRIMARY_URL needs GATEWAY_API_TOKEN (the primary's service token)")
+		}
+		go follower.Run(context.Background())
+		log.Printf("edge replica of %s (node %s)", primaryURL, follower.Node)
+	}
 	var issuer *acme.Issuer
-	if email := cfg.Get().ACMEEmail; email != "" || os.Getenv("ACME") == "true" {
+	if email := cfg.Get().ACMEEmail; follower == nil && (email != "" || os.Getenv("ACME") == "true") {
 		issuer = acme.New(st, email, os.Getenv("ACME_DIRECTORY"))
 		if v := cfg.Get(); v.DNSProvider != "" {
 			if err := issuer.SetDNS(v.DNSProvider, v.DNSAPIToken); err != nil {
@@ -155,8 +169,9 @@ func main() {
 	go hc.Run(hcCtx)
 
 	adminSrv := &http.Server{
-		Addr:    adminAddr,
-		Handler: api.New(st, adminUser, adminPass, ui, cb, hc, api.Options{APIToken: apiToken, Version: version, Issuer: issuerOrNil(issuer), Metrics: rec, Settings: cfg}).Handler(),
+		Addr: adminAddr,
+		Handler: api.New(st, adminUser, adminPass, ui, cb, hc, api.Options{APIToken: apiToken, Version: version, Issuer: issuerOrNil(issuer), Metrics: rec, Settings: cfg,
+			Follower: follower, Challenge: challengeOrNil(issuer)}).Handler(),
 	}
 	go func() {
 		if adminUser == "" {
@@ -182,7 +197,9 @@ func main() {
 	}()
 
 	p := proxy.New(st, cb.Webroot)
-	if issuer != nil {
+	if follower != nil {
+		p.Challenge = follower.Challenge
+	} else if issuer != nil {
 		p.Challenge = issuer.ChallengeResponse
 	}
 	p.Metrics = rec
@@ -284,4 +301,16 @@ func issuerOrNil(i *acme.Issuer) api.CertIssuer {
 		return nil
 	}
 	return i
+}
+
+func challengeOrNil(i *acme.Issuer) func(string) (string, bool) {
+	if i == nil {
+		return nil
+	}
+	return i.ChallengeResponse
+}
+
+func hostname() string {
+	h, _ := os.Hostname()
+	return h
 }

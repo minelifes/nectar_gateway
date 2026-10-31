@@ -110,6 +110,20 @@ Push setup (ntfy, free): install the ntfy app ([Android](https://play.google.com
 | `FALLBACK_HTTP` / `FALLBACK_TLS` | — | default fallback upstream / SNI passthrough target (`host:port`); `PUT /api/settings` overrides |
 | `RATE_LIMIT_BLOCK_MINUTES` | `10` | how long a client that keeps exceeding a rate limit is blocked (`0` = never, only 429); `PUT /api/settings` overrides |
 | `ACCESS_LOG_SIZE` | `2000` | access-log entries kept in memory |
+| `PRIMARY_URL` | — | makes this gateway an **edge replica** of the primary at this admin URL (see below) |
+| `NODE_NAME` | hostname | the replica's name as the primary lists it |
+
+### Edge replicas (several edge nodes)
+
+Run one **primary** (the gateway your controller talks to; it issues and renews certificates) and any number
+of **replicas** with `PRIMARY_URL=http://<primary-admin>:8081` and the same `GATEWAY_API_TOKEN`. Every 5 s a
+replica pulls `GET /api/replica/snapshot` (routes, certificates with keys, IP blocks, settings; `ETag`/304
+when nothing changed) and serves the same sites. ACME HTTP-01 requests that hit a replica are answered through
+the primary (`GET /api/replica/challenge/{token}`), so DNS can point to every edge node. A replica is
+read-only (writes answer 409), reports not-ready on `/readyz` until its first sync, keeps its own rate-limit
+blocks, and never uses the DNS token. `GET /api/replicas` lists the replicas seen by the primary (node,
+address, version, last pull, last sync error). Run the same version everywhere: replicas refuse a snapshot
+from another database schema. Feature flag: `replicas`.
 
 ### Releases
 
