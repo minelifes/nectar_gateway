@@ -129,6 +129,8 @@ from another database schema. Feature flag: `replicas`.
 
 Merging the release PR that release-please keeps open on `main` tags `vX.Y.Z`; `.github/workflows/release.yml` then pushes the multi-arch image `ghcr.io/minelifes/nectar-gateway:X.Y.Z` (+ `:X.Y`, `:stable`), attaches `release.json` (read by the nectar-apps updater) and updates `updates.json` on `gh-pages`. Pre-releases: push a tag like `v0.3.0-beta.1`. Commit messages follow conventional commits (`fix:`, `feat:`, `feat!:` = breaking, `fix(security):`).
 
+**Release without a release PR:** label a pull request `release` (or `release:major`, `release:minor`, `release:patch`) and merge it into `main`. The workflow computes the next version from the conventional commits since the latest tag (the label can force the bump), tags the merge commit and publishes it the same way — no commit is added. release-please pauses while a tag is newer than `.release-please-manifest.json`; its open release PR is closed.
+
 Inside Kubernetes the gateway runs as a container (`Dockerfile`) with `hostNetwork` on ports 80/443; nectar_apps installs and drives it.
 
 ## Dev mode (UI hot reload)

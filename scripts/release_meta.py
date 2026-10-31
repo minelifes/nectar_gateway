@@ -4,6 +4,8 @@
   release_meta.py release-json --component panel --version 1.4.2 --image ghcr.io/minelifes/nectar-apps@sha256:… \
       --api-version-file internal/version/version.go --migrations-glob 'internal/store/migrations/*' > release.json
   release_meta.py update-feed --feed updates.json --release release.json
+  release_meta.py next-version [--bump auto|major|minor|patch]   # version of a "release"-labelled merge
+  release_meta.py tag-ahead                                      # "true" when a tag is newer than the manifest
 
 release.json describes one release (read by the panel's updater):
   component, version, channel (stable | beta), image (pinned digest), kind (patch | minor | major),
@@ -109,6 +111,56 @@ def update_feed(a):
     print(f"{a.feed}: {rel['component']} {rel['version']} ({rel['channel']})")
 
 
+def manifest_version(path=".release-please-manifest.json"):
+    try:
+        with open(path) as f:
+            return json.load(f).get(".", "0.0.0")
+    except FileNotFoundError:
+        return "0.0.0"
+
+
+def latest_stable_tag():
+    tags = [t for t in git("tag", "--list").split() if SEMVER.match(t) and not parse(t)[3]]
+    return max(tags, key=lambda t: parse(t)[:3]) if tags else None
+
+
+def next_version(a):
+    """The next version for a merged pull request labelled "release": the newer of the latest stable tag and
+    the release-please manifest, bumped like release-please would (feat → minor, fix and others → patch,
+    feat! / BREAKING CHANGE → major; before 1.0 a breaking change bumps the minor version), or as the label
+    release:major|minor|patch says."""
+    tag = latest_stable_tag()
+    base = max([parse(manifest_version(a.manifest))[:3]] + ([parse(tag)[:3]] if tag else []))
+    bump = a.bump
+    if bump == "auto":
+        log = git("log", "--format=%s%n%b%x1e", f"{tag}..HEAD" if tag else "HEAD")
+        commits = [c.strip() for c in log.split("\x1e") if c.strip()]
+        if not commits:
+            sys.exit(f"nothing to release: no commits since {tag}")
+        subjects = [c.splitlines()[0] for c in commits]
+        if any(re.match(r"^\w+(\([^)]*\))?!:", s) for s in subjects) or any("BREAKING CHANGE" in c for c in commits):
+            bump = "minor" if base[0] == 0 else "major"
+        elif any(re.match(r"^feat(\([^)]*\))?:", s) for s in subjects):
+            bump = "minor"
+        else:
+            bump = "patch"
+    major, minor, patch = base
+    if bump == "major":
+        major, minor, patch = major + 1, 0, 0
+    elif bump == "minor":
+        minor, patch = minor + 1, 0
+    else:
+        patch += 1
+    print(f"{major}.{minor}.{patch}")
+
+
+def tag_ahead(a):
+    """true when the latest stable tag is newer than the release-please manifest (a labelled release
+    happened since the last release PR): release-please would propose a version that already exists."""
+    tag = latest_stable_tag()
+    print("true" if tag and parse(tag)[:3] > parse(manifest_version(a.manifest))[:3] else "false")
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -123,8 +175,13 @@ def main():
     f.add_argument("--feed", required=True)
     f.add_argument("--release", required=True)
     f.add_argument("--keep", type=int, default=30)
+    n = sub.add_parser("next-version")
+    n.add_argument("--bump", default="auto", choices=["auto", "major", "minor", "patch"])
+    n.add_argument("--manifest", default=".release-please-manifest.json")
+    t = sub.add_parser("tag-ahead")
+    t.add_argument("--manifest", default=".release-please-manifest.json")
     a = p.parse_args()
-    {"release-json": release_json, "update-feed": update_feed}[a.cmd](a)
+    {"release-json": release_json, "update-feed": update_feed, "next-version": next_version, "tag-ahead": tag_ahead}[a.cmd](a)
 
 
 if __name__ == "__main__":
