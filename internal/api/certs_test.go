@@ -74,7 +74,7 @@ func TestCertificatesAPIAndDNSSettings(t *testing.T) {
 
 	// features tell controllers what this build can do
 	_, v := call(t, ts, "GET", "/api/version", "", nil)
-	if f, _ := json.Marshal(v["features"]); string(f) != `["certificates","rate-limit-429","web-options","acme"]` {
+	if f, _ := json.Marshal(v["features"]); string(f) != `["certificates","rate-limit-429","web-options","replicas","acme"]` {
 		t.Fatalf("features %s", f)
 	}
 	// a wildcard needs the DNS provider first

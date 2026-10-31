@@ -24,6 +24,7 @@ import (
 	"nectar_gateway/internal/health"
 	"nectar_gateway/internal/metrics"
 	"nectar_gateway/internal/nginx"
+	"nectar_gateway/internal/replica"
 	"nectar_gateway/internal/settings"
 	"nectar_gateway/internal/store"
 )
@@ -53,6 +54,10 @@ type Server struct {
 	sessions map[string]time.Time // web cookie session token -> expiry
 	access   map[string]time.Time // mobile access token -> expiry
 	limiter  *loginLimiter
+	// edge replicas: the primary keeps a registry of them; a replica has a follower
+	replicas  replica.Registry
+	follower  *replica.Follower
+	challenge func(token string) (string, bool) // ACME HTTP-01 answers (primary with the built-in issuer)
 }
 
 // CertIssuer obtains certificates (implemented by the built-in ACME client).
@@ -67,6 +72,10 @@ type Options struct {
 	Issuer   CertIssuer // built-in ACME client
 	Metrics  *metrics.Recorder
 	Settings *settings.Settings
+	// Follower makes this gateway an edge replica of the primary (PRIMARY_URL).
+	Follower *replica.Follower
+	// Challenge answers ACME HTTP-01 tokens for replicas (the built-in issuer).
+	Challenge func(token string) (string, bool)
 }
 
 func New(s *store.Store, user, pass string, ui fs.FS, cb certbot.Config, hc *health.Checker, opt ...Options) *Server {
@@ -79,6 +88,7 @@ func New(s *store.Store, user, pass string, ui fs.FS, cb certbot.Config, hc *hea
 	}
 	if len(opt) > 0 {
 		srv.apiToken, srv.issuer, srv.metrics, srv.settings = opt[0].APIToken, opt[0].Issuer, opt[0].Metrics, opt[0].Settings
+		srv.follower, srv.challenge = opt[0].Follower, opt[0].Challenge
 		if opt[0].Version != "" {
 			srv.version = opt[0].Version
 		}
@@ -124,12 +134,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/dns/records", s.requireAuth(s.listDNSRecords))
 	mux.HandleFunc("PUT /api/dns/records", s.requireAuth(s.putDNSRecords))
 	mux.HandleFunc("DELETE /api/dns/records", s.requireAuth(s.deleteDNSRecords))
+	mux.HandleFunc("GET /api/replica/snapshot", s.replicaSnapshot)
+	mux.HandleFunc("GET /api/replica/challenge/{token}", s.replicaChallenge)
+	mux.HandleFunc("GET /api/replicas", s.requireAuth(s.listReplicas))
 
 	// unauthenticated: probes and version discovery
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.Ping(); err != nil {
 			http.Error(w, "database: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if s.follower != nil && !s.follower.Synced() {
+			http.Error(w, "replica: not synced with the primary yet", http.StatusServiceUnavailable)
 			return
 		}
 		w.Write([]byte("ok\n"))
@@ -145,7 +162,7 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "headless mode: the admin UI is disabled (ADMIN_UI=false)"})
 		})
 	}
-	return mux
+	return s.replicaReadOnly(mux)
 }
 
 // ---- auth ----
@@ -288,7 +305,8 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 func (s *Server) features() []string {
 	// standalone / wildcard certificates; rate limits answer 429; per-route web options (redirect rules,
 	// IP allowlist, headers, CORS, gzip, HSTS)
-	f := []string{"certificates", "rate-limit-429", "web-options"}
+	// replicas: several edge gateways (GET /api/replicas, /api/replica/snapshot)
+	f := []string{"certificates", "rate-limit-429", "web-options", "replicas"}
 	if s.settings != nil && s.settings.Get().DNSProvider != "" {
 		f = append(f, "dns-records") // PUT/DELETE /api/dns/records
 	}
