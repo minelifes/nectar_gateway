@@ -146,6 +146,9 @@ func (h *Handler) newReverseProxy(transport http.RoundTripper) *httputil.Reverse
 				Host:   net.JoinHostPort(route.TargetIP, fmt.Sprint(route.TargetPort)),
 			}
 			pr.SetURL(target)
+			if route.Web != nil && route.Web.StripPrefix {
+				stripPrefix(pr.Out.URL, route.PathPrefix)
+			}
 			pr.Out.Host = pr.In.Host // preserve original Host header
 			pr.SetXForwarded()       // X-Forwarded-For / -Host / -Proto
 			applyRequestHeaders(pr.Out, route.Web)
@@ -169,6 +172,29 @@ func (h *Handler) newReverseProxy(transport http.RoundTripper) *httputil.Reverse
 			errorPage(w, r, http.StatusBadGateway, "This app is not responding",
 				"The app behind this address is starting, restarting or down. Try again in a moment.")
 		},
+	}
+}
+
+// stripPrefix removes the route's path prefix from the backend URL: /api/users → /users, /api → /.
+// The prefix matched the request already (longest-prefix routing), on a path-segment boundary.
+func stripPrefix(u *url.URL, prefix string) {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return
+	}
+	trim := func(p string) string {
+		if !strings.HasPrefix(p, prefix) {
+			return p
+		}
+		rest := p[len(prefix):]
+		if rest == "" || rest[0] != '/' {
+			rest = "/" + rest
+		}
+		return rest
+	}
+	u.Path = trim(u.Path)
+	if u.RawPath != "" {
+		u.RawPath = trim(u.RawPath)
 	}
 }
 

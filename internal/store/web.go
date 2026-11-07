@@ -32,6 +32,9 @@ type Web struct {
 	HSTS           int  `json:"hsts,omitempty"`
 	HSTSSubdomains bool `json:"hsts_subdomains,omitempty"`
 	HSTSPreload    bool `json:"hsts_preload,omitempty"`
+	// StripPrefix removes the route's path prefix before proxying: route /api, request /api/users →
+	// backend /users (feature "strip-prefix"). Ignored for the whole-host route "/".
+	StripPrefix bool `json:"strip_prefix,omitempty"`
 
 	allow []netip.Prefix // parsed AllowIPs
 }
@@ -57,7 +60,7 @@ type CORS struct {
 // IsZero reports whether no option is set.
 func (w *Web) IsZero() bool {
 	return w == nil || (len(w.Redirects) == 0 && len(w.AllowIPs) == 0 && len(w.ResponseHeaders) == 0 &&
-		len(w.RequestHeaders) == 0 && w.CORS == nil && !w.Compress && w.HSTS == 0)
+		len(w.RequestHeaders) == 0 && w.CORS == nil && !w.Compress && w.HSTS == 0 && !w.StripPrefix)
 }
 
 var headerNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$")

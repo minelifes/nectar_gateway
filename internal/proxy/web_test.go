@@ -183,3 +183,28 @@ func TestWebHSTSOnlyOverTLS(t *testing.T) {
 		}
 	}
 }
+
+// strip_prefix: /api/users on the /api route reaches the backend as /users (/api as /); without it the
+// path is kept; the whole-host route is never stripped.
+func TestWebStripPrefix(t *testing.T) {
+	ts, st := setup(t)
+	wh, wp := backend(t, "web")
+	ah, ap := backend(t, "api")
+	kh, kp := backend(t, "keep")
+	st.Create(&store.Route{Domain: "shop.example.com", PathPrefix: "/", TargetIP: wh, TargetPort: wp, Web: &store.Web{StripPrefix: true}})
+	st.Create(&store.Route{Domain: "shop.example.com", PathPrefix: "/api", TargetIP: ah, TargetPort: ap, Web: &store.Web{StripPrefix: true}})
+	st.Create(&store.Route{Domain: "shop.example.com", PathPrefix: "/keep", TargetIP: kh, TargetPort: kp})
+	for path, want := range map[string]string{
+		"/api/users?x=1": "api shop.example.com /users",
+		"/api":           "api shop.example.com /",
+		"/api/":          "api shop.example.com /",
+		"/api/a%2Fb":     "api shop.example.com /a/b",
+		"/keep/x":        "keep shop.example.com /keep/x",
+		"/apiary":        "web shop.example.com /apiary",
+		"/home":          "web shop.example.com /home",
+	} {
+		if code, body := get(t, ts, "shop.example.com", path); code != 200 || body != want {
+			t.Errorf("%s: %d %q, want %q", path, code, body, want)
+		}
+	}
+}

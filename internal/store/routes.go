@@ -453,7 +453,8 @@ func (s *Store) Update(r *Route) error {
 			r.Web = old.Web // "web" omitted → keep the current options
 		}
 	}
-	if old, ok := s.Get(r.ID); ok && r.CertPEM == "" && r.KeyPEM == "" {
+	// a stored certificate belongs to its host: a route moved to another domain starts without one
+	if old, ok := s.Get(r.ID); ok && r.CertPEM == "" && r.KeyPEM == "" && old.Domain == r.Domain {
 		r.CertPEM, r.KeyPEM = old.CertPEM, old.KeyPEM
 		if r.CertSource == "" || r.CertSource == old.CertSource {
 			r.CertSource, r.CertNotAfter = old.CertSource, old.CertNotAfter
