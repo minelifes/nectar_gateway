@@ -35,6 +35,7 @@ type Handler struct {
 	proxiesMu   sync.Mutex                          // guards proxies
 	proxies     map[proxyKey]*httputil.ReverseProxy // one reverse proxy per (protocol, timeout)
 	auth        *authCache                          // verified basic-auth credentials (bcrypt is slow)
+	waker       *waker                              // wakes backends scaled to zero (web.wake)
 	acmeWebroot string                              // dir served at /.well-known/acme-challenge/ over HTTP
 	certMu      sync.Mutex
 	certs       map[string]*cachedCert // domain -> cert
@@ -57,6 +58,23 @@ type Handler struct {
 type proxyKey struct {
 	proto   string
 	timeout time.Duration
+	sni     string // HTTPS backends: the TLS server name (the site's host, not the backend's IP)
+}
+
+// maxSNIProxies bounds the per-host HTTPS transports (wildcard routes could see many hosts); past it a
+// host's transport is built per request without being cached.
+const maxSNIProxies = 4096
+
+// backendHost is the site name the backend sees (Host header and TLS server name): web.backend_host when
+// set, else the client's host (without the port).
+func backendHost(route store.Route, reqHost string) string {
+	if route.Web != nil && route.Web.BackendHost != "" {
+		return route.Web.BackendHost
+	}
+	if h, _, err := net.SplitHostPort(reqHost); err == nil {
+		return h
+	}
+	return reqHost
 }
 
 // DefaultTimeout is the response-header timeout for routes without timeout_seconds (like nginx's 60s).
@@ -81,6 +99,7 @@ func New(s *store.Store, acmeWebroot string) *Handler {
 		abuse:   newHitTracker(time.Minute),
 		proxies: map[proxyKey]*httputil.ReverseProxy{},
 		auth:    newAuthCache(),
+		waker:   newWaker(),
 	}
 	h.base = &http.Transport{
 		DialContext: (&net.Dialer{
@@ -102,9 +121,20 @@ func New(s *store.Store, acmeWebroot string) *Handler {
 	return h
 }
 
-// proxyFor returns the reverse proxy for a route's protocol and timeout (created once, then cached).
-func (h *Handler) proxyFor(route store.Route) *httputil.ReverseProxy {
+// proxyFor returns the reverse proxy for a route's protocol and timeout (created once, then cached). An
+// HTTPS backend gets the site's name in its TLS handshake (SNI): addressed by IP alone, a server with
+// several sites (nginx, Apache) answers with its default site.
+func (h *Handler) proxyFor(route store.Route, reqHost string) *httputil.ReverseProxy {
 	key := proxyKey{proto: route.BackendProtocol, timeout: DefaultTimeout}
+	if route.TargetHTTPS {
+		sni := backendHost(route, reqHost)
+		if h, _, err := net.SplitHostPort(sni); err == nil {
+			sni = h
+		}
+		if sni = strings.TrimSuffix(sni, "."); sni != "" && net.ParseIP(sni) == nil {
+			key.sni = strings.ToLower(sni)
+		}
+	}
 	if key.proto == "" {
 		key.proto = store.ProtoHTTP1
 	}
@@ -118,13 +148,19 @@ func (h *Handler) proxyFor(route store.Route) *httputil.ReverseProxy {
 	}
 	t := h.base.Clone()
 	t.ResponseHeaderTimeout = key.timeout
+	if key.sni != "" {
+		t.TLSClientConfig = t.TLSClientConfig.Clone()
+		t.TLSClientConfig.ServerName = key.sni
+	}
 	if key.proto == store.ProtoH2C {
 		// prior-knowledge HTTP/2 over plain TCP (gRPC backends)
 		t.Protocols = new(http.Protocols)
 		t.Protocols.SetUnencryptedHTTP2(true)
 	}
 	rp := h.newReverseProxy(t)
-	h.proxies[key] = rp
+	if key.sni == "" || len(h.proxies) < maxSNIProxies {
+		h.proxies[key] = rp
+	}
 	return rp
 }
 
@@ -150,7 +186,10 @@ func (h *Handler) newReverseProxy(transport http.RoundTripper) *httputil.Reverse
 				stripPrefix(pr.Out.URL, route.PathPrefix)
 			}
 			pr.Out.Host = pr.In.Host // preserve original Host header
-			pr.SetXForwarded()       // X-Forwarded-For / -Host / -Proto
+			if route.Web != nil && route.Web.BackendHost != "" {
+				pr.Out.Host = route.Web.BackendHost // the name the backend's own server config expects
+			}
+			pr.SetXForwarded() // X-Forwarded-For / -Host / -Proto
 			applyRequestHeaders(pr.Out, route.Web)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -371,7 +410,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 					fb.TargetIP = hp
 					fmt.Sscan(port, &fb.TargetPort)
 				}
-				h.proxyFor(fb).ServeHTTP(w, r.WithContext(withRoute(r.Context(), fb)))
+				h.proxyFor(fb, r.Host).ServeHTTP(w, r.WithContext(withRoute(r.Context(), fb)))
 				return
 			}
 		}
@@ -453,12 +492,21 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 		errorPage(w, r, http.StatusServiceUnavailable, "Down for maintenance", "This app is being updated. Please check back in a few minutes.")
 		return
 	}
+	if route.Mode != store.ModeStatic && route.Web != nil && route.Web.Wake != nil && !h.waker.ready(r.Context(), route) {
+		if r.Context().Err() != nil {
+			return
+		}
+		w.Header().Set("Retry-After", "5")
+		errorPage(w, r, http.StatusServiceUnavailable, "This app is starting",
+			"It was asleep after a while without visitors and is waking up. Try again in a few seconds.")
+		return
+	}
 	if route.Mode == store.ModeStatic {
 		h.serveStatic(w, r, route.StaticDir)
 		return
 	}
 	ctx := withRoute(r.Context(), route)
-	h.proxyFor(route).ServeHTTP(w, r.WithContext(ctx))
+	h.proxyFor(route, r.Host).ServeHTTP(w, r.WithContext(ctx))
 }
 
 // redirectTarget appends the request path and query to the route's redirect URL, unless the
