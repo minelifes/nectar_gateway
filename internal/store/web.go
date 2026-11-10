@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -24,7 +25,11 @@ type Web struct {
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 	// RequestHeaders are set on the request to the backend ("" value removes the header).
 	RequestHeaders map[string]string `json:"request_headers,omitempty"`
-	CORS           *CORS             `json:"cors,omitempty"`
+	// BackendHost replaces the site name the backend sees (Host header, and the TLS server name of an
+	// HTTPS backend), e.g. when the other server's nginx knows the site under another name. Empty: the
+	// client's host is passed on.
+	BackendHost string `json:"backend_host,omitempty"`
+	CORS        *CORS  `json:"cors,omitempty"`
 	// Compress gzip-compresses text responses (HTML, CSS, JS, JSON, SVG, XML, plain text) when the client
 	// accepts it and the backend did not compress them already.
 	Compress bool `json:"compress,omitempty"`
@@ -35,8 +40,17 @@ type Web struct {
 	// StripPrefix removes the route's path prefix before proxying: route /api, request /api/users →
 	// backend /users (feature "strip-prefix"). Ignored for the whole-host route "/".
 	StripPrefix bool `json:"strip_prefix,omitempty"`
+	// Wake: the backend may be scaled to zero (feature "wake"). When it refuses connections the gateway
+	// calls Wake.URL once and holds the request until the backend answers (or Wake.Timeout passes).
+	Wake *Wake `json:"wake,omitempty"`
 
 	allow []netip.Prefix // parsed AllowIPs
+}
+
+// Wake is how a sleeping backend is woken up.
+type Wake struct {
+	URL     string `json:"url"`               // called with POST; e.g. the panel's internal wake endpoint
+	Timeout int    `json:"timeout,omitempty"` // seconds to hold requests while it starts (default 60, at most 300)
 }
 
 // RedirectRule redirects one path (Prefix=false) or every path under it (Prefix=true).
@@ -60,10 +74,13 @@ type CORS struct {
 // IsZero reports whether no option is set.
 func (w *Web) IsZero() bool {
 	return w == nil || (len(w.Redirects) == 0 && len(w.AllowIPs) == 0 && len(w.ResponseHeaders) == 0 &&
-		len(w.RequestHeaders) == 0 && w.CORS == nil && !w.Compress && w.HSTS == 0 && !w.StripPrefix)
+		len(w.RequestHeaders) == 0 && w.BackendHost == "" && w.CORS == nil && !w.Compress && w.HSTS == 0 && !w.StripPrefix && w.Wake == nil)
 }
 
 var headerNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$")
+
+// backendHostRe: a DNS name or an IPv4 address (optionally with a port, checked separately).
+var backendHostRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 
 // hop-by-hop and framing headers the gateway manages itself.
 var reservedHeaders = []string{"Connection", "Content-Length", "Transfer-Encoding", "Upgrade", "Host", "Te", "Trailer", "Keep-Alive"}
@@ -75,6 +92,18 @@ func (w *Web) Normalize() error {
 	}
 	if len(w.Redirects) > 100 {
 		return errors.New("web.redirects: at most 100 rules")
+	}
+	if w.Wake != nil {
+		u, err := url.Parse(w.Wake.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("web.wake.url must be an http(s) URL")
+		}
+		switch {
+		case w.Wake.Timeout == 0:
+			w.Wake.Timeout = 60
+		case w.Wake.Timeout < 5 || w.Wake.Timeout > 300:
+			return errors.New("web.wake.timeout must be 5–300 seconds")
+		}
 	}
 	for i := range w.Redirects {
 		r := &w.Redirects[i]
@@ -129,6 +158,19 @@ func (w *Web) Normalize() error {
 			if strings.ContainsAny(v, "\r\n") || len(v) > 4096 {
 				return fmt.Errorf("web: invalid value for header %s", k)
 			}
+		}
+	}
+	if w.BackendHost != "" {
+		w.BackendHost = strings.ToLower(strings.TrimSpace(w.BackendHost))
+		h := w.BackendHost
+		if hh, port, err := net.SplitHostPort(h); err == nil {
+			if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("web: backend_host %q has a bad port", w.BackendHost)
+			}
+			h = hh
+		}
+		if len(w.BackendHost) > 253 || !backendHostRe.MatchString(h) {
+			return fmt.Errorf("web: backend_host %q is not a host name", w.BackendHost)
 		}
 	}
 	if c := w.CORS; c != nil {

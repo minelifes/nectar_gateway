@@ -307,7 +307,7 @@ func (s *Server) features() []string {
 	// IP allowlist, headers, CORS, gzip, HSTS)
 	// replicas: several edge gateways (GET /api/replicas, /api/replica/snapshot)
 	// strip-prefix: web option strip_prefix removes the route's path before proxying
-	f := []string{"certificates", "rate-limit-429", "web-options", "replicas", "strip-prefix"}
+	f := []string{"certificates", "rate-limit-429", "web-options", "replicas", "strip-prefix", "wake", "backend-host"}
 	if s.settings != nil && s.settings.Get().DNSProvider != "" {
 		f = append(f, "dns-records") // PUT/DELETE /api/dns/records
 	}
