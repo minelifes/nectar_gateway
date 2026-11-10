@@ -5,6 +5,25 @@
       "stable": [
         {
           "component": "gateway",
+          "version": "1.2.7",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:6c99654bd038f49dfdadc32cd0f2584a30971cf93cf8b931b2f6d87c3cf6fc89",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": false,
+          "notes": "- Fix proxy",
+          "previous": "1.2.6",
+          "published_at": "2026-11-10T19:50:44+00:00"
+        },
+        {
+          "component": "gateway",
           "version": "1.2.6",
           "channel": "stable",
           "image": "ghcr.io/minelifes/nectar-gateway@sha256:c964932009b071646673d666e7245c987dc856a48a22099d420ef03bf0ace0c4",
@@ -138,6 +157,25 @@
         }
       ],
       "beta": [
+        {
+          "component": "gateway",
+          "version": "1.2.7",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:6c99654bd038f49dfdadc32cd0f2584a30971cf93cf8b931b2f6d87c3cf6fc89",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": false,
+          "notes": "- Fix proxy",
+          "previous": "1.2.6",
+          "published_at": "2026-11-10T19:50:44+00:00"
+        },
         {
           "component": "gateway",
           "version": "1.2.6",
@@ -274,5 +312,5 @@
       ]
     }
   },
-  "updated_at": "2026-11-07T03:37:33+00:00"
+  "updated_at": "2026-11-10T19:50:44+00:00"
 }
