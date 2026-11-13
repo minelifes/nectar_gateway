@@ -45,6 +45,9 @@ type Handler struct {
 	// RateLimitBlock is how long a client that keeps exceeding a rate limit is blocked (nil or 0 = never;
 	// over the limit it gets 429 either way).
 	RateLimitBlock func() time.Duration
+	// Exempt reports whether an IP is on the allowlist (settings allow_ips): never blocked, never rate
+	// limited, not judged by the scanner detection. nil = nobody.
+	Exempt func(ip string) bool
 	// Challenge answers ACME HTTP-01 tokens from the built-in issuer (nil = webroot only).
 	Challenge func(token string) (string, bool)
 	// Metrics records per-domain statistics and the access log (nil = off).
@@ -81,8 +84,10 @@ func backendHost(route store.Route, reqHost string) string {
 const DefaultTimeout = 60 * time.Second
 
 // abuseFactor: a client blocked for RateLimitBlock had more than abuseFactor × limit requests rejected
-// within one minute (e.g. limit 10 req/s → more than 100 rejected in a minute).
-const abuseFactor = 10
+// within one minute, i.e. it kept sending at least twice the limit for the whole minute (limit 10 req/s →
+// more than 600 rejected in a minute). It was 10: a busy page of a signed-in person (bursts of parallel
+// requests, polling) crossed that within a few page loads and the person was locked out.
+const abuseFactor = 60
 
 func (h *Handler) rateLimitBlock() time.Duration {
 	if h.RateLimitBlock == nil {
@@ -378,24 +383,28 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 	}
 
 	ip := clientIP(r)
-	if h.store.IsBlocked(ip) {
+	// exempt: on the allowlist. safe: also the addresses of people signed in to the panel — never blocked
+	// (an old block is ignored), but their rate limits still answer 429.
+	exempt := h.Exempt != nil && h.Exempt(ip)
+	safe := exempt || h.store.IsTrusted(ip)
+	if !safe && h.store.IsBlocked(ip) {
 		errorPage(w, r, http.StatusForbidden, "Access blocked", "Your IP address is temporarily blocked.")
 		return
 	}
-	if isScannerPath(r.URL.Path) {
-		if err := h.store.Block(ip, "scanner path: "+r.URL.Path, BlockTTL); err == nil {
-			log.Printf("blocked %s for 24h: scanner path %s", ip, r.URL.Path)
-		}
-		http.Error(w, "403 Forbidden", http.StatusForbidden)
-		return
-	}
-
 	host := r.Host
 	if hp, _, err := net.SplitHostPort(host); err == nil {
 		host = hp
 	}
 	host = strings.ToLower(host)
 	route, ok := h.store.Lookup(host, r.URL.Path)
+	// paths only scanners ask for block the client, unless the route really serves them (WordPress …)
+	if !safe && isScannerPath(r.URL.Path) && !(ok && route.Web != nil && route.Web.AllowScannerPaths) {
+		if err := h.store.Block(ip, "scanner path: "+r.URL.Path, BlockTTL); err == nil {
+			log.Printf("blocked %s for 24h: scanner path %s", ip, r.URL.Path)
+		}
+		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		return
+	}
 	if !ok {
 		if h.store.KnownHost(host) { // host exists, but no path prefix matches
 			*matched = host
@@ -414,7 +423,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 				return
 			}
 		}
-		if h.unknown.note(ip, 30) {
+		if !safe && h.unknown.note(ip, 30) {
 			if err := h.store.Block(ip, "domain scanning: repeated requests for unknown domains", BlockTTL); err == nil {
 				log.Printf("blocked %s for 24h: unknown-domain scanning", ip)
 			}
@@ -429,10 +438,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, matched *string)
 		errorPage(w, r, http.StatusForbidden, "Access restricted", "This site only accepts visitors from allowed networks.")
 		return
 	}
-	if route.RateLimit > 0 && !h.rate.allow(ip+"|"+route.Domain, route.RateLimit) {
-		// over the limit: 429, the client may retry in a second. Only sustained abuse (more than ten
-		// times the limit rejected within a minute) blocks the IP, for RateLimitBlock.
-		if d := h.rateLimitBlock(); d > 0 && h.abuse.note(ip+"|"+route.Domain, abuseFactor*route.RateLimit) {
+	if route.RateLimit > 0 && !exempt && !h.rate.allow(ip+"|"+route.Domain, route.RateLimit) {
+		// over the limit: 429, the client may retry in a second. Only sustained abuse (see abuseFactor)
+		// blocks the IP, for RateLimitBlock.
+		if d := h.rateLimitBlock(); d > 0 && !safe && h.abuse.note(ip+"|"+route.Domain, abuseFactor*route.RateLimit) {
 			if err := h.store.Block(ip, fmt.Sprintf("rate limit: kept exceeding %d req/s on %s", route.RateLimit, route.Domain), d); err == nil {
 				log.Printf("blocked %s for %s: kept exceeding the rate limit on %s", ip, d, route.Domain)
 			}

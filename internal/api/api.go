@@ -118,6 +118,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/blocked", s.requireAuth(s.listBlocked))
 	mux.HandleFunc("DELETE /api/blocked/{ip}", s.requireAuth(s.unblockIP))
 	mux.HandleFunc("POST /api/blocked", s.requireAuth(s.blockIP))
+	mux.HandleFunc("GET /api/trusted", s.requireAuth(s.listTrusted))
+	mux.HandleFunc("POST /api/trusted", s.requireAuth(s.trustIP))
 	mux.HandleFunc("GET /api/fallback-hits", s.requireAuth(s.getFallbackHits))
 	mux.HandleFunc("DELETE /api/fallback-hits", s.requireAuth(s.resetFallbackHits))
 	mux.HandleFunc("PUT /api/routes/{id}/cert", s.requireAuth(s.uploadCert))
@@ -307,7 +309,7 @@ func (s *Server) features() []string {
 	// IP allowlist, headers, CORS, gzip, HSTS)
 	// replicas: several edge gateways (GET /api/replicas, /api/replica/snapshot)
 	// strip-prefix: web option strip_prefix removes the route's path before proxying
-	f := []string{"certificates", "rate-limit-429", "web-options", "replicas", "strip-prefix", "wake", "backend-host"}
+	f := []string{"certificates", "rate-limit-429", "web-options", "replicas", "strip-prefix", "wake", "backend-host", "allow-ips", "scanner-switch"}
 	if s.settings != nil && s.settings.Get().DNSProvider != "" {
 		f = append(f, "dns-records") // PUT/DELETE /api/dns/records
 	}
@@ -514,11 +516,51 @@ func (s *Server) blockIP(w http.ResponseWriter, r *http.Request) {
 	if reason == "" {
 		reason = "blocked by an administrator"
 	}
+	if s.settings.Allowed(ip.String()) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": ip.String() + " is on the allowlist (settings, allow_ips): remove it there first"})
+		return
+	}
 	if err := s.store.Block(ip.String(), reason, ttl); err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// trustIP keeps an IP from being blocked for a while (see store.Trust): {"ip": "...", "ttl_seconds": 43200}.
+func (s *Server) trustIP(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		IP         string `json:"ip"`
+		TTLSeconds int64  `json:"ttl_seconds"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	ip := net.ParseIP(strings.TrimSpace(in.IP))
+	if ip == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip must be an IPv4 or IPv6 address"})
+		return
+	}
+	if in.TTLSeconds <= 0 || in.TTLSeconds > 7*24*3600 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ttl_seconds must be 1 to 604800 (a week)"})
+		return
+	}
+	s.store.Trust(ip.String(), time.Duration(in.TTLSeconds)*time.Second)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listTrusted(w http.ResponseWriter, r *http.Request) {
+	type entry struct {
+		IP    string    `json:"ip"`
+		Until time.Time `json:"until"`
+	}
+	out := []entry{}
+	for ip, until := range s.store.Trusted() {
+		out = append(out, entry{ip, until})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
+	writeJSON(w, http.StatusOK, out)
 }
 
 // getFallbackHits lists hosts served by the fallback upstream / TLS passthrough (migration soak).
@@ -682,6 +724,6 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	log.Printf("settings: fallback_http=%q fallback_tls=%q acme_email=%q dns_provider=%q rate_limit_block_minutes=%d", v.FallbackHTTP, v.FallbackTLS, v.ACMEEmail, v.DNSProvider, v.RateLimitBlockMinutes)
+	log.Printf("settings: fallback_http=%q fallback_tls=%q acme_email=%q dns_provider=%q rate_limit_block_minutes=%d allow_ips=%d", v.FallbackHTTP, v.FallbackTLS, v.ACMEEmail, v.DNSProvider, v.RateLimitBlockMinutes, len(v.AllowIPs))
 	writeJSON(w, http.StatusOK, s.settings.Get().Public())
 }

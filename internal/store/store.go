@@ -37,6 +37,7 @@ type Store struct {
 	mu      sync.RWMutex
 	table   routeTable           // host → routes (longest path prefix first)
 	blocked map[string]BlockedIP // ip -> block
+	trusted map[string]time.Time // ip -> until: never blocked meanwhile (in memory; see Trust)
 	certs   map[int64]Certificate
 }
 
@@ -52,7 +53,7 @@ func New(path string) (*Store, error) {
 	if err := migrate(db); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	s := &Store{db: db, blocked: map[string]BlockedIP{}}
+	s := &Store{db: db, blocked: map[string]BlockedIP{}, trusted: map[string]time.Time{}}
 	if err := s.reload(); err != nil {
 		return nil, err
 	}
@@ -267,6 +268,47 @@ func (s *Store) IsBlocked(ip string) bool {
 	b, ok := s.blocked[ip]
 	s.mu.RUnlock()
 	return ok && time.Now().Before(b.ExpiresAt)
+}
+
+// Trust keeps an IP from being blocked for d: the panel reports the addresses of signed-in people, so
+// someone working in the panel or in their own apps is not locked out by the abuse detection (rate limits
+// still answer 429). Kept in memory: the panel reports again while the person is active.
+func (s *Store) Trust(ip string, d time.Duration) {
+	now := time.Now()
+	s.mu.Lock()
+	if len(s.trusted) > 10000 {
+		for k, until := range s.trusted {
+			if now.After(until) {
+				delete(s.trusted, k)
+			}
+		}
+	}
+	if len(s.trusted) <= 10000 {
+		s.trusted[ip] = now.Add(d)
+	}
+	s.mu.Unlock()
+}
+
+// IsTrusted reports whether ip is currently trusted (Trust).
+func (s *Store) IsTrusted(ip string) bool {
+	s.mu.RLock()
+	until, ok := s.trusted[ip]
+	s.mu.RUnlock()
+	return ok && time.Now().Before(until)
+}
+
+// Trusted lists the currently trusted IPs with their expiry.
+func (s *Store) Trusted() map[string]time.Time {
+	now := time.Now()
+	out := map[string]time.Time{}
+	s.mu.RLock()
+	for ip, until := range s.trusted {
+		if now.Before(until) {
+			out[ip] = until
+		}
+	}
+	s.mu.RUnlock()
+	return out
 }
 
 // Block blocks an IP for the given duration.

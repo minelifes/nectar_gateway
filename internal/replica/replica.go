@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -170,7 +171,7 @@ func (f *Follower) Sync(ctx context.Context) error {
 			// replicas never talk to the DNS provider or ACME: the primary does
 			cur := f.Settings.Get()
 			v.DNSProvider, v.DNSAPIToken = cur.DNSProvider, cur.DNSAPIToken
-			if v != cur {
+			if !reflect.DeepEqual(v, cur) {
 				if err := f.Settings.Set(v); err != nil {
 					log.Printf("replica: settings: %v", err)
 				}

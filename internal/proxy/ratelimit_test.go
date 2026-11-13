@@ -55,8 +55,15 @@ func TestRateLimitAnswers429(t *testing.T) {
 		if r := req(t, ts, "other.example.com", "/"); r.StatusCode != 200 {
 			t.Fatalf("other domains are not affected: %d", r.StatusCode)
 		}
-		// sustained abuse: more than 10 × limit rejected within a minute
+		// a few busy page loads are not abuse
 		for i := 0; i < 30; i++ {
+			req(t, ts, "api.example.com", "/")
+		}
+		if st.IsBlocked("127.0.0.1") {
+			t.Fatalf("block=%s: blocked after 40 requests", block)
+		}
+		// sustained abuse: more than 60 × limit rejected within a minute
+		for i := 0; i < 100; i++ {
 			req(t, ts, "api.example.com", "/")
 		}
 		if got := st.IsBlocked("127.0.0.1"); got != (block > 0) {
@@ -69,6 +76,95 @@ func TestRateLimitAnswers429(t *testing.T) {
 			}
 		}
 		ts.Close()
+	}
+}
+
+// The allowlist is never rate limited or blocked (an old block is ignored); a trusted address (someone
+// signed in to the panel) still gets 429 but is never blocked, also not by the scanner detection.
+func TestAllowlistAndTrustedIPs(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	defer backend.Close()
+	u, _ := url.Parse(backend.URL)
+	host, ps, _ := net.SplitHostPort(u.Host)
+	port, _ := strconv.Atoi(ps)
+	st, err := store.New(filepath.Join(t.TempDir(), "gw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(st, "")
+	h.RateLimitBlock = func() time.Duration { return 5 * time.Minute }
+	allow := false
+	h.Exempt = func(ip string) bool { return allow && ip == "127.0.0.1" }
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	st.Create(&store.Route{Domain: "api.example.com", TargetIP: host, TargetPort: port, RateLimit: 2})
+	flood := func(n int) map[int]int {
+		codes := map[int]int{}
+		for i := 0; i < n; i++ {
+			codes[req(t, ts, "api.example.com", "/").StatusCode]++
+		}
+		return codes
+	}
+
+	// trusted: limited (429) but never blocked, whatever it does
+	st.Trust("127.0.0.1", time.Hour)
+	if codes := flood(200); codes[429] < 150 || st.IsBlocked("127.0.0.1") {
+		t.Fatalf("trusted: %v blocked=%v", codes, st.IsBlocked("127.0.0.1"))
+	}
+	if r := req(t, ts, "api.example.com", "/wp-login.php"); r.StatusCode == 403 || st.IsBlocked("127.0.0.1") {
+		t.Fatalf("trusted client blocked by a scanner path: %d", r.StatusCode)
+	}
+	if r := req(t, ts, "nobody.example.com", "/"); r.StatusCode != 410 {
+		t.Fatalf("unknown host: %d", r.StatusCode)
+	}
+	if len(st.Trusted()) != 1 {
+		t.Fatalf("trusted list: %v", st.Trusted())
+	}
+
+	// an address blocked earlier works again once it is on the allowlist, without any limit
+	st.Trust("127.0.0.1", -time.Second)
+	st.Block("127.0.0.1", "test", time.Hour)
+	if r := req(t, ts, "api.example.com", "/"); r.StatusCode != 403 {
+		t.Fatalf("blocked client: %d", r.StatusCode)
+	}
+	allow = true
+	if codes := flood(300); codes[200] != 300 {
+		t.Fatalf("allowlisted: %v", codes)
+	}
+	if r := req(t, ts, "api.example.com", "/.env"); r.StatusCode == 403 {
+		t.Fatalf("allowlisted client refused on a scanner path: %d", r.StatusCode)
+	}
+}
+
+// A route whose app really serves /wp-admin & co. can switch the scanner-path blocking off for itself.
+func TestAllowScannerPathsPerRoute(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) }))
+	defer backend.Close()
+	u, _ := url.Parse(backend.URL)
+	host, ps, _ := net.SplitHostPort(u.Host)
+	port, _ := strconv.Atoi(ps)
+	st, err := store.New(filepath.Join(t.TempDir(), "gw.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(st, ""))
+	defer ts.Close()
+	st.Create(&store.Route{Domain: "blog.example.com", TargetIP: host, TargetPort: port, Web: &store.Web{AllowScannerPaths: true}})
+	st.Create(&store.Route{Domain: "api.example.com", TargetIP: host, TargetPort: port})
+	for _, p := range []string{"/wp-login.php", "/wp-admin/index.php", "/xmlrpc.php"} {
+		if r := req(t, ts, "blog.example.com", p); r.StatusCode != 200 {
+			t.Fatalf("%s on the WordPress route: %d", p, r.StatusCode)
+		}
+	}
+	if st.IsBlocked("127.0.0.1") {
+		t.Fatal("blocked on a route that allows these paths")
+	}
+	// other routes still block, and then the client is blocked everywhere
+	if r := req(t, ts, "api.example.com", "/wp-login.php"); r.StatusCode != 403 || !st.IsBlocked("127.0.0.1") {
+		t.Fatalf("other route: %d blocked=%v", r.StatusCode, st.IsBlocked("127.0.0.1"))
+	}
+	if r := req(t, ts, "blog.example.com", "/"); r.StatusCode != 403 {
+		t.Fatalf("a blocked client on the WordPress route: %d", r.StatusCode)
 	}
 }
 

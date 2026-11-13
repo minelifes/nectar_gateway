@@ -204,6 +204,7 @@ func main() {
 	}
 	p.Metrics = rec
 	p.FallbackTarget = func() string { return cfg.Get().FallbackHTTP }
+	p.Exempt = cfg.Allowed
 	p.RateLimitBlock = func() time.Duration { return time.Duration(cfg.Get().RateLimitBlockMinutes) * time.Minute }
 	// SNI passthrough: TLS for hosts without a certificate here goes to FALLBACK_TLS untouched.
 	decide := func(sni string) string {

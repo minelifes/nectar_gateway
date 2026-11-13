@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,9 +24,12 @@ type Values struct {
 	FallbackTLS string `json:"fallback_tls"`
 	// ACMEEmail is the Let's Encrypt account contact ("" = no contact). Defaults to ACME_EMAIL.
 	ACMEEmail string `json:"acme_email"`
-	// RateLimitBlockMinutes: a client that keeps exceeding a route's rate limit (more than 10× the limit
+	// RateLimitBlockMinutes: a client that keeps exceeding a route's rate limit (more than 60× the limit
 	// rejected within a minute) is blocked this long; 0 = never (it only gets 429). Default 10.
 	RateLimitBlockMinutes int `json:"rate_limit_block_minutes"`
+	// AllowIPs are addresses and networks (CIDR) the gateway never blocks and never rate limits: your
+	// office, your VPN, a monitoring service. Blocks already recorded for them are ignored.
+	AllowIPs []string `json:"allow_ips"`
 	// DNSProvider answers ACME DNS-01 challenges (needed for wildcard certificates): "" | "cloudflare".
 	DNSProvider string `json:"dns_provider"`
 	// DNSAPIToken is the provider credential (Cloudflare: an API token with Zone:Read and DNS:Edit).
@@ -62,7 +67,59 @@ type Settings struct {
 	mu sync.RWMutex
 	v  Values
 
+	allow []netip.Prefix // AllowIPs, parsed
+
 	hooks []func(Values)
+}
+
+// MaxAllowIPs bounds the allowlist (it is checked on every request).
+const MaxAllowIPs = 200
+
+// parseAllow turns an address or a network into a prefix ("1.2.3.4" → 1.2.3.4/32).
+func parseAllow(s string) (netip.Prefix, error) {
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p.Masked(), nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("allow_ips: %q is not an IP address or a network like 203.0.113.0/24", s)
+	}
+	a = a.Unmap()
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+func parseAllowList(list []string) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(list))
+	for _, s := range list {
+		if p, err := parseAllow(s); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// Allowed reports whether ip is on the allowlist (never blocked, never rate limited).
+func (s *Settings) Allowed(ip string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	allow := s.allow
+	s.mu.RUnlock()
+	if len(allow) == 0 {
+		return false
+	}
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	a = a.Unmap()
+	for _, p := range allow {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // OnChange registers fn to run after every successful Set (e.g. to update the ACME account contact).
@@ -95,6 +152,7 @@ func Load(kv KV, defaults Values) (*Settings, error) {
 			return nil, fmt.Errorf("settings: %w", err)
 		}
 	}
+	s.allow = parseAllowList(s.v.AllowIPs)
 	return s, s.v.Validate()
 }
 
@@ -116,6 +174,13 @@ func (s *Settings) Set(v Values) error {
 	if v.DNSProvider == "" {
 		v.DNSAPIToken = ""
 	}
+	allow := make([]string, 0, len(v.AllowIPs))
+	for _, a := range v.AllowIPs {
+		if a = strings.TrimSpace(a); a != "" && !slices.Contains(allow, a) {
+			allow = append(allow, a)
+		}
+	}
+	v.AllowIPs = allow
 	if err := v.Validate(); err != nil {
 		return err
 	}
@@ -125,6 +190,7 @@ func (s *Settings) Set(v Values) error {
 	}
 	s.mu.Lock()
 	s.v = v
+	s.allow = parseAllowList(v.AllowIPs)
 	hooks := append([]func(Values){}, s.hooks...)
 	s.mu.Unlock()
 	for _, fn := range hooks {
@@ -142,6 +208,18 @@ func (v Values) Validate() error {
 	}
 	if v.RateLimitBlockMinutes < 0 || v.RateLimitBlockMinutes > 7*24*60 {
 		return errors.New("rate_limit_block_minutes must be 0 (never) to 10080 (a week)")
+	}
+	if len(v.AllowIPs) > MaxAllowIPs {
+		return fmt.Errorf("allow_ips: at most %d entries (use networks like 203.0.113.0/24)", MaxAllowIPs)
+	}
+	for _, a := range v.AllowIPs {
+		p, err := parseAllow(a)
+		if err != nil {
+			return err
+		}
+		if p.Bits() == 0 {
+			return fmt.Errorf("allow_ips: %s would allow everyone", a)
+		}
 	}
 	if v.DNSProvider != "" {
 		known := false
