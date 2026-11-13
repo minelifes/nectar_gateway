@@ -33,3 +33,36 @@ func TestACMEEmailAndHooks(t *testing.T) {
 		t.Fatalf("clear: %+v %v", s.Get(), err)
 	}
 }
+
+func TestAllowIPs(t *testing.T) {
+	kv := memKV{}
+	s, _ := Load(kv, Values{})
+	if s.Allowed("203.0.113.7") {
+		t.Fatal("empty allowlist allows")
+	}
+	for _, bad := range [][]string{{"not-an-ip"}, {"0.0.0.0/0"}, {"::/0"}, {"10.0.0.0/33"}} {
+		if err := s.Set(Values{AllowIPs: bad}); err == nil {
+			t.Fatalf("%v accepted", bad)
+		}
+	}
+	if err := s.Set(Values{AllowIPs: []string{" 203.0.113.7 ", "198.51.100.0/24", "2001:db8::/32", "203.0.113.7", ""}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Get().AllowIPs; len(got) != 3 {
+		t.Fatalf("normalized: %v", got)
+	}
+	for ip, want := range map[string]bool{"203.0.113.7": true, "203.0.113.8": false, "198.51.100.200": true, "::ffff:198.51.100.9": true,
+		"2001:db8:1::5": true, "2001:db9::1": false, "garbage": false} {
+		if s.Allowed(ip) != want {
+			t.Errorf("Allowed(%s) != %v", ip, want)
+		}
+	}
+	// kept across a restart
+	s2, err := Load(kv, Values{})
+	if err != nil || !s2.Allowed("198.51.100.1") {
+		t.Fatalf("reload: %v", err)
+	}
+	if (*Settings)(nil).Allowed("198.51.100.1") {
+		t.Fatal("nil settings allow")
+	}
+}

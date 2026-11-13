@@ -32,6 +32,8 @@ permissions:
 env:
   COMPONENT: gateway
   IMAGE: ghcr.io/${{ github.repository_owner }}/nectar-gateway
+  COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+  COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
 
 jobs:
   release-please:
@@ -159,6 +161,18 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.tag.outputs.version }}
             org.opencontainers.image.licenses=LicenseRef-Nectar-Source-License-1.0
+
+      # cosign: the panel verifies this signature before it applies the update (internal/update/cosign.go,
+      # public key in internal/update/release_keys.pem of nectar_apps). Skipped until the repository has the
+      # secrets COSIGN_PRIVATE_KEY and COSIGN_PASSWORD (cosign generate-key-pair). cosign 2.x on purpose:
+      # it stores the signature as the tag sha256-<digest>.sig, which is what the panel reads.
+      - uses: sigstore/cosign-installer@v3
+        if: env.COSIGN_PRIVATE_KEY != ''
+        with:
+          cosign-release: v2.5.3
+      - name: Sign the image
+        if: env.COSIGN_PRIVATE_KEY != ''
+        run: cosign sign --yes --key env://COSIGN_PRIVATE_KEY --tlog-upload=false "$IMAGE@${{ steps.build.outputs.digest }}"
 
       - name: release.json
         run: |

@@ -29,7 +29,11 @@ type Web struct {
 	// HTTPS backend), e.g. when the other server's nginx knows the site under another name. Empty: the
 	// client's host is passed on.
 	BackendHost string `json:"backend_host,omitempty"`
-	CORS        *CORS  `json:"cors,omitempty"`
+	// AllowScannerPaths turns the scanner-path blocking off for this route: paths such as /wp-admin,
+	// /wp-login.php or /phpmyadmin get a visitor blocked for a day on other routes, but an app that really
+	// serves them (WordPress, phpMyAdmin) needs them reachable.
+	AllowScannerPaths bool  `json:"allow_scanner_paths,omitempty"`
+	CORS              *CORS `json:"cors,omitempty"`
 	// Compress gzip-compresses text responses (HTML, CSS, JS, JSON, SVG, XML, plain text) when the client
 	// accepts it and the backend did not compress them already.
 	Compress bool `json:"compress,omitempty"`
@@ -74,7 +78,7 @@ type CORS struct {
 // IsZero reports whether no option is set.
 func (w *Web) IsZero() bool {
 	return w == nil || (len(w.Redirects) == 0 && len(w.AllowIPs) == 0 && len(w.ResponseHeaders) == 0 &&
-		len(w.RequestHeaders) == 0 && w.BackendHost == "" && w.CORS == nil && !w.Compress && w.HSTS == 0 && !w.StripPrefix && w.Wake == nil)
+		len(w.RequestHeaders) == 0 && w.BackendHost == "" && !w.AllowScannerPaths && w.CORS == nil && !w.Compress && w.HSTS == 0 && !w.StripPrefix && w.Wake == nil)
 }
 
 var headerNameRe = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$")
