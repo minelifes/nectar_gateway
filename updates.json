@@ -5,6 +5,25 @@
       "stable": [
         {
           "component": "gateway",
+          "version": "1.2.8",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:9a3db954a1b3408880b51a6294fffa70b488cd139f9865d0707563bdd53025b8",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": true,
+          "notes": "- fixed bug if logged user stay long in admin part and do a lot of requests his ip is bunned. added white list ips",
+          "previous": "1.2.7",
+          "published_at": "2026-11-13T16:22:13+00:00"
+        },
+        {
+          "component": "gateway",
           "version": "1.2.7",
           "channel": "stable",
           "image": "ghcr.io/minelifes/nectar-gateway@sha256:6c99654bd038f49dfdadc32cd0f2584a30971cf93cf8b931b2f6d87c3cf6fc89",
@@ -157,6 +176,25 @@
         }
       ],
       "beta": [
+        {
+          "component": "gateway",
+          "version": "1.2.8",
+          "channel": "stable",
+          "image": "ghcr.io/minelifes/nectar-gateway@sha256:9a3db954a1b3408880b51a6294fffa70b488cd139f9865d0707563bdd53025b8",
+          "kind": "patch",
+          "security": false,
+          "breaking": false,
+          "api_version": 1,
+          "requires": {
+            "panel_api": [
+              1
+            ]
+          },
+          "migrations": true,
+          "notes": "- fixed bug if logged user stay long in admin part and do a lot of requests his ip is bunned. added white list ips",
+          "previous": "1.2.7",
+          "published_at": "2026-11-13T16:22:13+00:00"
+        },
         {
           "component": "gateway",
           "version": "1.2.7",
@@ -312,5 +350,5 @@
       ]
     }
   },
-  "updated_at": "2026-11-10T19:50:44+00:00"
+  "updated_at": "2026-11-13T16:22:13+00:00"
 }
