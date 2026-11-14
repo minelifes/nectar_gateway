@@ -57,3 +57,19 @@ func TestBackendHostValidation(t *testing.T) {
 		t.Fatalf("%v %q", err, w.BackendHost)
 	}
 }
+
+// The backend learns how the visitor came in: proto, host and port (Keycloak builds its URLs from them).
+func TestForwardedHeaders(t *testing.T) {
+	ts, st := setup(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, r.Header.Get("X-Forwarded-Proto")+" "+r.Header.Get("X-Forwarded-Host")+" "+r.Header.Get("X-Forwarded-Port"))
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	port, _ := strconv.Atoi(u.Port())
+	st.Create(&store.Route{Domain: "auth.example.com", TargetIP: "127.0.0.1", TargetPort: port})
+	_, gwPort, _ := strings.Cut(strings.TrimPrefix(ts.URL, "http://"), ":")
+	if code, body := get(t, ts, "auth.example.com", "/"); code != 200 || body != "http auth.example.com "+gwPort {
+		t.Fatalf("%d %q", code, body)
+	}
+}

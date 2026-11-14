@@ -195,6 +195,9 @@ func (h *Handler) newReverseProxy(transport http.RoundTripper) *httputil.Reverse
 				pr.Out.Host = route.Web.BackendHost // the name the backend's own server config expects
 			}
 			pr.SetXForwarded() // X-Forwarded-For / -Host / -Proto
+			// the port the visitor used: apps that build their own URLs from the forwarded headers
+			// (Keycloak/Quarkus, Spring) otherwise fall back to their own port or to http
+			pr.Out.Header.Set("X-Forwarded-Port", forwardedPort(pr.In))
 			applyRequestHeaders(pr.Out, route.Web)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -625,4 +628,17 @@ func (h *Handler) serveStatic(w http.ResponseWriter, r *http.Request, root strin
 		return
 	}
 	http.ServeFile(w, r, full)
+}
+
+// forwardedPort is the port the client connected to (443 or 80 when unknown).
+func forwardedPort(r *http.Request) string {
+	if a, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+		if _, p, err := net.SplitHostPort(a.String()); err == nil && p != "" {
+			return p
+		}
+	}
+	if r.TLS != nil {
+		return "443"
+	}
+	return "80"
 }
